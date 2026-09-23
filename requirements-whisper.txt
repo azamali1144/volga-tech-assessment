@@ -1,0 +1,4 @@
+# Adds the real Whisper engine (pulls in PyTorch, roughly 2 GB).
+# Install with: pip install -r requirements-whisper.txt
+-r requirements.txt
+openai-whisper>=20240930
