@@ -1,4 +1,4 @@
-"""Audio processing: duration probing and format normalization via ffmpeg.
+"""Audio processing: duration probing, format normalization, and chunking.
 
 ffmpeg/ffprobe are invoked as subprocesses (argument lists, never a shell
 string), so user-supplied filenames can't inject shell commands. Any failure
@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_SAMPLE_RATE = 16_000
@@ -133,3 +135,118 @@ def normalize_to_wav(
             f"Could not convert audio: {_last_stderr_line(result.stderr, src, dst)}",
         )
     return dst
+
+
+# ---------------------------------------------------------------------------
+# Chunking
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AudioChunk:
+    """One slice of a longer recording.
+
+    ``start``/``end`` are positions in the *original* file, in seconds. The
+    merge step uses ``start`` to shift chunk-local timestamps back onto the
+    global timeline.
+    """
+
+    index: int
+    path: Path
+    start: float
+    end: float
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+
+def plan_chunks(
+    duration: float, chunk_length: float, overlap: float
+) -> list[tuple[float, float]]:
+    """Compute ``(start, end)`` windows covering ``[0, duration]``.
+
+    Consecutive windows overlap by ``overlap`` seconds so a word spoken right
+    at a boundary is fully contained in at least one chunk. Windows advance by
+    ``chunk_length - overlap``; the last window is clamped to ``duration``.
+    Pure arithmetic, no I/O — this is what the overlap/offset tests target.
+    """
+    if duration <= 0:
+        raise ValueError("duration must be positive")
+    if chunk_length <= 0:
+        raise ValueError("chunk_length must be positive")
+    if not 0 <= overlap < chunk_length:
+        raise ValueError("overlap must be >= 0 and smaller than chunk_length")
+
+    step = chunk_length - overlap
+    windows: list[tuple[float, float]] = []
+    i = 0
+    while True:
+        # Multiply rather than accumulate, so float error doesn't drift
+        # across hundreds of chunks in a multi-hour file.
+        start = i * step
+        end = min(start + chunk_length, duration)
+        windows.append((start, end))
+        if end >= duration:
+            return windows
+        i += 1
+
+
+def split_into_chunks(
+    wav_path: str | Path,
+    out_dir: str | Path,
+    chunk_length: float,
+    overlap: float,
+) -> list[AudioChunk]:
+    """Split a normalized WAV into overlapping chunk files.
+
+    Expects the output of ``normalize_to_wav`` (PCM WAV). Slicing is done on
+    raw frames with the stdlib ``wave`` module instead of spawning ffmpeg per
+    chunk: it's sample-exact (chunk offsets are exactly what the merge step
+    assumes), needs no re-encoding, and costs one pass over the file.
+    """
+    wav_path, out_dir = Path(wav_path), Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        src = wave.open(str(wav_path), "rb")
+    except FileNotFoundError as exc:
+        raise AudioProcessingError(
+            "file_not_found", f"No such file: {wav_path.name}"
+        ) from exc
+    except (wave.Error, EOFError) as exc:
+        raise AudioProcessingError(
+            "invalid_audio", f"Not a PCM WAV file: {wav_path.name}"
+        ) from exc
+
+    with src:
+        params = src.getparams()
+        rate = params.framerate
+        total_frames = params.nframes
+        if total_frames == 0:
+            raise AudioProcessingError("invalid_audio", "Audio file has no duration")
+
+        chunks: list[AudioChunk] = []
+        windows = plan_chunks(total_frames / rate, chunk_length, overlap)
+        for index, (start_s, end_s) in enumerate(windows):
+            # Snap to whole frames; report the snapped times so offsets used by
+            # the merge step match the audio actually in each chunk file.
+            start_f = round(start_s * rate)
+            end_f = min(round(end_s * rate), total_frames)
+            src.setpos(start_f)
+            frames = src.readframes(end_f - start_f)
+
+            chunk_path = out_dir / f"{wav_path.stem}.chunk{index:04d}.wav"
+            with wave.open(str(chunk_path), "wb") as dst:
+                dst.setparams(params)
+                dst.writeframes(frames)
+
+            chunks.append(
+                AudioChunk(
+                    index=index,
+                    path=chunk_path,
+                    start=start_f / rate,
+                    end=end_f / rate,
+                )
+            )
+    return chunks
