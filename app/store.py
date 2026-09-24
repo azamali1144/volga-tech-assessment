@@ -26,6 +26,39 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
+# Lifecycle:  queued -> processing -> completed
+#                          |   ^
+#                          v   |
+#                        retrying            (any non-terminal) -> failed
+#
+# Each transition lists the states it may start from. Enforcing this in the
+# UPDATE's WHERE clause makes every transition an atomic compare-and-set: if
+# two workers ever raced on one job, only one transition would win.
+ALLOWED_FROM: dict[JobStatus, frozenset[JobStatus]] = {
+    JobStatus.PROCESSING: frozenset({JobStatus.QUEUED, JobStatus.RETRYING}),
+    JobStatus.RETRYING: frozenset({JobStatus.PROCESSING}),
+    JobStatus.COMPLETED: frozenset({JobStatus.PROCESSING}),
+    JobStatus.FAILED: frozenset(
+        {JobStatus.QUEUED, JobStatus.PROCESSING, JobStatus.RETRYING}
+    ),
+}
+TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
+
+
+class JobNotFoundError(LookupError):
+    pass
+
+
+class InvalidTransitionError(RuntimeError):
+    def __init__(self, job_id: str, current: JobStatus, target: JobStatus) -> None:
+        super().__init__(
+            f"Job {job_id}: cannot move from {current.value!r} to {target.value!r}"
+        )
+        self.job_id = job_id
+        self.current = current
+        self.target = target
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id                TEXT PRIMARY KEY,
@@ -166,3 +199,72 @@ class JobStore:
                 "SELECT * FROM jobs WHERE id = ?", (job_id,)
             ).fetchone()
         return Job.from_row(row) if row else None
+
+    # --- status transitions -----------------------------------------------
+
+    def _transition(
+        self, job_id: str, target: JobStatus, set_sql: str = "", params: tuple = ()
+    ) -> Job:
+        allowed = sorted(status.value for status in ALLOWED_FROM[target])
+        placeholders = ", ".join("?" for _ in allowed)
+        extra = f", {set_sql}" if set_sql else ""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                f"""
+                UPDATE jobs SET status = ?, updated_at = ?{extra}
+                WHERE id = ? AND status IN ({placeholders})
+                """,
+                (target.value, utc_now(), *params, job_id, *allowed),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        if row is None:
+            raise JobNotFoundError(job_id)
+        job = Job.from_row(row)
+        if cursor.rowcount == 0:
+            raise InvalidTransitionError(job_id, job.status, target)
+        return job
+
+    def mark_processing(self, job_id: str) -> Job:
+        """A worker has picked the job up (first attempt or a retry)."""
+        return self._transition(job_id, JobStatus.PROCESSING)
+
+    def mark_retrying(self, job_id: str, error_code: str, error_message: str) -> Job:
+        """An attempt failed transiently; record why and count the retry."""
+        return self._transition(
+            job_id,
+            JobStatus.RETRYING,
+            "retry_count = retry_count + 1, error_code = ?, error_message = ?",
+            (error_code, error_message),
+        )
+
+    def mark_completed(
+        self,
+        job_id: str,
+        language: str | None = None,
+        duration_seconds: float | None = None,
+    ) -> Job:
+        """Transcription succeeded.
+
+        Error fields from earlier failed attempts are cleared so a completed
+        job doesn't present a stale error to callers; ``retry_count`` is kept
+        as the record of how many attempts it took.
+        """
+        return self._transition(
+            job_id,
+            JobStatus.COMPLETED,
+            "language = COALESCE(?, language), "
+            "duration_seconds = COALESCE(?, duration_seconds), "
+            "error_code = NULL, error_message = NULL",
+            (language, duration_seconds),
+        )
+
+    def mark_failed(self, job_id: str, error_code: str, error_message: str) -> Job:
+        """Permanent failure: retries exhausted or the error isn't retryable."""
+        return self._transition(
+            job_id,
+            JobStatus.FAILED,
+            "error_code = ?, error_message = ?, failed_at = ?",
+            (error_code, error_message, utc_now()),
+        )
