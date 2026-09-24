@@ -235,9 +235,10 @@ class JobStore:
         if status is not None:
             sql += " AND status = ?"
             params.append(JobStatus(status).value)
-        # id breaks ties between jobs created in the same millisecond, so
-        # pagination is stable.
-        sql += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        # rowid (insertion order) breaks ties between jobs created in the same
+        # millisecond, so "newest first" and pagination stay exact. On
+        # Postgres this would be a BIGSERIAL column.
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
         params += [limit, offset]
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
