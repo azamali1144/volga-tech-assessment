@@ -172,6 +172,15 @@ class JobStore:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def ping(self) -> bool:
+        """True if the database answers a trivial query (health checks)."""
+        try:
+            with self._lock:
+                self._conn.execute("SELECT 1").fetchone()
+            return True
+        except sqlite3.Error:
+            return False
+
     # --- jobs -------------------------------------------------------------
 
     def create_job(

@@ -44,6 +44,8 @@ from app.queue_backend import InMemoryQueue
 from app.rate_limit import RateLimiter
 from app.schemas import (
     ErrorResponse,
+    HealthChecks,
+    HealthResponse,
     JobCreatedResponse,
     JobListResponse,
     JobResponse,
@@ -368,6 +370,28 @@ async def list_transcriptions(
     )
 
 
+def health(request: Request, response: Response) -> HealthResponse:
+    """Liveness/readiness probe for a load balancer or orchestrator.
+
+    Unauthenticated on purpose (probes don't carry API keys) and cheap: one
+    trivial query plus in-memory checks. Returns ``503`` when unhealthy so the
+    instance is taken out of rotation / restarted.
+    """
+    services: Services = request.app.state.services
+    workers_running = sum(1 for task in services.worker_tasks if not task.done())
+    checks = HealthChecks(database=services.store.ping(), workers=workers_running > 0)
+    healthy = checks.database and checks.workers
+    if not healthy:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return HealthResponse(
+        status="ok" if healthy else "unhealthy",
+        checks=checks,
+        queue_depth=services.queue.size(),
+        delayed_retries=services.queue.delayed_count,
+        workers_running=workers_running,
+    )
+
+
 # --- app assembly ------------------------------------------------------------
 
 
@@ -496,6 +520,15 @@ def create_app(
 
     install_error_handlers(app)
     app.include_router(router)
+    app.add_api_route(
+        "/healthz",
+        health,
+        methods=["GET"],
+        response_model=HealthResponse,
+        responses={503: {"model": HealthResponse, "description": "A check failed."}},
+        summary="Health check (no auth)",
+        tags=["ops"],
+    )
     return app
 
 

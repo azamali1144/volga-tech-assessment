@@ -140,6 +140,19 @@ class JobListResponse(BaseModel):
     )
 
 
+class HealthChecks(BaseModel):
+    database: bool
+    workers: bool
+
+
+class HealthResponse(BaseModel):
+    status: str = Field(description="'ok' when every check passes, otherwise 'unhealthy'.")
+    checks: HealthChecks
+    queue_depth: int = Field(description="Jobs waiting to be picked up by a worker.")
+    delayed_retries: int = Field(description="Failed attempts waiting out their backoff.")
+    workers_running: int
+
+
 class ErrorResponse(BaseModel):
     """Body of every non-2xx response."""
 
