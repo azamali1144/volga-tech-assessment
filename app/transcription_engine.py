@@ -8,10 +8,14 @@ is a configuration choice, not something callers know about.
 from __future__ import annotations
 
 import threading
+import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from app.audio import AudioProcessingError
+from app.config import Settings
 
 TIMESTAMP_PRECISION = 2  # seconds, rounded to 10ms
 
@@ -165,3 +169,66 @@ class WhisperEngine:
             language=raw.get("language"),
             duration=round(duration, TIMESTAMP_PRECISION) if duration is not None else None,
         )
+
+
+class MockEngine:
+    """Deterministic stand-in for a real engine: no model, no network.
+
+    Emits one segment every ``segment_seconds`` across the audio's actual
+    duration, with text naming the segment's time span. The same file always
+    yields the same result, and because the output follows the real audio
+    length, chunking and merging are exercised exactly as they would be with
+    Whisper. Used by the test suite and for offline development.
+    """
+
+    name = "mock"
+
+    def __init__(self, segment_seconds: float = 2.0, delay_seconds: float = 0.0) -> None:
+        if segment_seconds <= 0:
+            raise ValueError("segment_seconds must be positive")
+        self.segment_seconds = segment_seconds
+        # Optional artificial latency, to make queueing/concurrency observable
+        # when poking at the running service by hand.
+        self.delay_seconds = delay_seconds
+
+    def transcribe(self, audio_path: Path) -> TranscriptionResult:
+        duration = _wav_duration(Path(audio_path))
+        if duration is None:
+            raise AudioProcessingError(
+                "invalid_audio", f"Not a readable WAV file: {Path(audio_path).name}"
+            )
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
+
+        segments = []
+        start = 0.0
+        while start < duration:
+            end = min(start + self.segment_seconds, duration)
+            segments.append(
+                Segment(
+                    id=len(segments),
+                    start=round(start, TIMESTAMP_PRECISION),
+                    end=round(end, TIMESTAMP_PRECISION),
+                    text=f"mock speech {start:.2f}-{end:.2f}",
+                )
+            )
+            start = len(segments) * self.segment_seconds  # no float drift
+        return TranscriptionResult(
+            text=" ".join(s.text for s in segments),
+            segments=segments,
+            language="en",
+            duration=round(duration, TIMESTAMP_PRECISION),
+        )
+
+
+def get_engine(settings: Settings) -> TranscriptionEngine:
+    """Build the engine selected by ``TRANSCRIPTION_ENGINE``.
+
+    The only place that knows the concrete engine classes; swapping engines is
+    a config change, never a code change for callers.
+    """
+    if settings.transcription_engine == "whisper":
+        return WhisperEngine(model_name=settings.whisper_model)
+    if settings.transcription_engine == "mock":
+        return MockEngine()
+    raise ValueError(f"Unknown transcription engine: {settings.transcription_engine!r}")
