@@ -13,6 +13,8 @@ from functools import lru_cache
 from pathlib import Path
 
 VALID_ENGINES = frozenset({"mock", "whisper"})
+VALID_LOG_FORMATS = frozenset({"json", "text"})
+VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
 
 def _env_str(name: str, default: str) -> str:
@@ -75,6 +77,10 @@ class Settings:
     # per model, so for real throughput scale worker *processes* instead.
     worker_count: int = 1
 
+    # --- Logging ---
+    log_level: str = "INFO"
+    log_format: str = "json"  # "json" | "text"
+
     # --- Persistence ---
     storage_dir: Path = Path("storage")
     inline_transcript_max_chars: int = 20_000
@@ -103,6 +109,10 @@ class Settings:
                 f"TRANSCRIPTION_ENGINE must be one of {sorted(VALID_ENGINES)}, "
                 f"got {self.transcription_engine!r}"
             )
+        if self.log_format not in VALID_LOG_FORMATS:
+            raise ValueError(f"LOG_FORMAT must be one of {sorted(VALID_LOG_FORMATS)}")
+        if self.log_level not in VALID_LOG_LEVELS:
+            raise ValueError(f"LOG_LEVEL must be one of {sorted(VALID_LOG_LEVELS)}")
         if not self.api_keys:
             raise ValueError("API_KEYS must contain at least one key")
         if self.chunk_length_seconds <= 0:
@@ -176,6 +186,8 @@ class Settings:
                 "RETRY_BACKOFF_BASE_SECONDS", d.retry_backoff_base_seconds
             ),
             worker_count=_env_int("WORKER_COUNT", d.worker_count),
+            log_level=_env_str("LOG_LEVEL", d.log_level).upper(),
+            log_format=_env_str("LOG_FORMAT", d.log_format).lower(),
             storage_dir=storage_dir,
             inline_transcript_max_chars=_env_int(
                 "INLINE_TRANSCRIPT_MAX_CHARS", d.inline_transcript_max_chars

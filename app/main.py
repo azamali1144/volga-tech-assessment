@@ -39,6 +39,7 @@ from starlette.responses import JSONResponse
 
 from app.audio import AudioProcessingError, probe_duration_seconds
 from app.config import Settings, get_settings
+from app.logging_config import configure_logging
 from app.queue_backend import InMemoryQueue
 from app.rate_limit import RateLimiter
 from app.schemas import (
@@ -407,10 +408,13 @@ def create_app(
     engine: TranscriptionEngine | None = None,
 ) -> FastAPI:
     """Application factory. Tests pass their own settings/engine."""
+    # Resolved here, at import time under uvicorn: a bad env var fails fast,
+    # and logging is configured before uvicorn's own startup lines.
+    cfg = settings or get_settings()
+    configure_logging(cfg.log_level, cfg.log_format)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        cfg = settings or get_settings()
         cfg.ensure_dirs()
         services = Services(
             settings=cfg,
