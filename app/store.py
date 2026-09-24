@@ -45,6 +45,7 @@ ALLOWED_FROM: dict[JobStatus, frozenset[JobStatus]] = {
     ),
 }
 TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
+MAX_LIST_LIMIT = 100
 
 
 class JobNotFoundError(LookupError):
@@ -216,6 +217,31 @@ class JobStore:
                 "SELECT * FROM jobs WHERE id = ?", (job_id,)
             ).fetchone()
         return Job.from_row(row) if row else None
+
+    def list_jobs(
+        self,
+        user_id: str,
+        limit: int = 20,
+        offset: int = 0,
+        status: JobStatus | None = None,
+    ) -> list[Job]:
+        """A caller's jobs, newest first. Always scoped to one ``user_id`` so
+        one API key can never see another's jobs. Served by the
+        ``(user_id, created_at DESC)`` index."""
+        limit = max(1, min(limit, MAX_LIST_LIMIT))
+        offset = max(0, offset)
+        sql = "SELECT * FROM jobs WHERE user_id = ?"
+        params: list[Any] = [user_id]
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(JobStatus(status).value)
+        # id breaks ties between jobs created in the same millisecond, so
+        # pagination is stable.
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        params += [limit, offset]
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [Job.from_row(row) for row in rows]
 
     # --- status transitions -----------------------------------------------
 
