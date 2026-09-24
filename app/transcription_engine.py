@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import threading
 import time
-import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, Sequence, runtime_checkable
 
-from app.audio import AudioChunk, AudioProcessingError
+from app.audio import AudioChunk, wav_duration_seconds
 from app.config import Settings
 
 TIMESTAMP_PRECISION = 2  # seconds, rounded to 10ms
@@ -91,14 +90,6 @@ class EngineUnavailableError(RuntimeError):
     """
 
 
-def _wav_duration(path: Path) -> float | None:
-    try:
-        with wave.open(str(path), "rb") as w:
-            return w.getnframes() / w.getframerate()
-    except (wave.Error, EOFError, OSError):
-        return None
-
-
 class WhisperEngine:
     """OpenAI Whisper, run locally.
 
@@ -145,7 +136,7 @@ class WhisperEngine:
             raw = model.transcribe(
                 str(audio_path), language=self.language, fp16=self._fp16
             )
-        return self._to_result(raw, _wav_duration(Path(audio_path)))
+        return self._to_result(raw, wav_duration_seconds(audio_path))
 
     @staticmethod
     def _to_result(raw: dict[str, Any], duration: float | None) -> TranscriptionResult:
@@ -192,11 +183,7 @@ class MockEngine:
         self.delay_seconds = delay_seconds
 
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
-        duration = _wav_duration(Path(audio_path))
-        if duration is None:
-            raise AudioProcessingError(
-                "invalid_audio", f"Not a readable WAV file: {Path(audio_path).name}"
-            )
+        duration = wav_duration_seconds(audio_path)
         if self.delay_seconds:
             time.sleep(self.delay_seconds)
 

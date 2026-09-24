@@ -137,6 +137,24 @@ def normalize_to_wav(
     return dst
 
 
+
+def wav_duration_seconds(path: str | Path) -> float:
+    """Duration of a PCM WAV from its header: exact and instant, no subprocess.
+
+    For files already normalized by ``normalize_to_wav``; anything else should
+    go through ``probe_duration_seconds``.
+    """
+    path = Path(path)
+    try:
+        with wave.open(str(path), "rb") as w:
+            return w.getnframes() / w.getframerate()
+    except FileNotFoundError as exc:
+        raise AudioProcessingError("file_not_found", f"No such file: {path.name}") from exc
+    except (wave.Error, EOFError, OSError, ZeroDivisionError) as exc:
+        raise AudioProcessingError(
+            "invalid_audio", f"Not a readable WAV file: {path.name}"
+        ) from exc
+
 # ---------------------------------------------------------------------------
 # Chunking
 # ---------------------------------------------------------------------------
