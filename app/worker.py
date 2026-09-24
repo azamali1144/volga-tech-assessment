@@ -9,17 +9,23 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import tempfile
 from pathlib import Path
 
 from app.audio import normalize_to_wav, split_into_chunks, wav_duration_seconds
 from app.config import Settings
+from app.queue_backend import JobQueue
+from app.storage_backend import ObjectStorage
+from app.store import InvalidTransitionError, Job, JobNotFoundError, JobStore
 from app.transcription_engine import (
     TIMESTAMP_PRECISION,
     TranscriptionEngine,
     TranscriptionResult,
     merge_chunk_results,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TranscriptionPipeline:
@@ -125,3 +131,112 @@ class TranscriptionPipeline:
             if isinstance(outcome, BaseException):
                 raise outcome
         return merge_chunk_results(chunks, outcomes)
+
+
+class Worker:
+    """Consumer side of the queue: claim a job, run the pipeline, persist.
+
+    Several ``Worker`` instances can share one queue and store (several
+    asyncio tasks here, or separate processes with a durable queue): the
+    store's compare-and-set on ``queued -> processing`` means a job id
+    delivered twice is only ever processed once.
+    """
+
+    def __init__(
+        self,
+        store: JobStore,
+        queue: JobQueue,
+        storage: ObjectStorage,
+        pipeline: TranscriptionPipeline,
+        *,
+        poll_timeout_seconds: float = 1.0,
+        name: str = "worker",
+    ) -> None:
+        self.store = store
+        self.queue = queue
+        self.storage = storage
+        self.pipeline = pipeline
+        self.poll_timeout_seconds = poll_timeout_seconds
+        self.name = name
+        self._stopping = asyncio.Event()
+
+    def stop(self) -> None:
+        """Ask ``run_forever`` to exit after the current job (graceful)."""
+        self._stopping.set()
+
+    async def run_forever(self) -> None:
+        logger.info("worker started", extra={"worker": self.name})
+        while not self._stopping.is_set():
+            job_id = await self.queue.dequeue(timeout=self.poll_timeout_seconds)
+            if job_id is None:
+                continue  # idle; loop round to re-check for shutdown
+            try:
+                await self._process_once(job_id)
+            except Exception:
+                # _process_once handles job failures itself; anything reaching
+                # here is a bug or an infrastructure fault (e.g. the database
+                # is down). Log it and keep the worker alive for other jobs.
+                logger.exception(
+                    "unexpected error processing job",
+                    extra={"worker": self.name, "job_id": job_id},
+                )
+        logger.info("worker stopped", extra={"worker": self.name})
+
+    async def _process_once(self, job_id: str) -> None:
+        try:
+            job = self.store.mark_processing(job_id)
+        except (JobNotFoundError, InvalidTransitionError) as exc:
+            # Duplicate delivery, or a message for a job that already finished
+            # or no longer exists: nothing to do.
+            logger.warning(
+                "skipping job that can't be claimed",
+                extra={"worker": self.name, "job_id": job_id, "reason": str(exc)},
+            )
+            return
+
+        logger.info(
+            "job processing",
+            extra={"worker": self.name, "job_id": job_id, "attempt": job.retry_count + 1},
+        )
+        try:
+            with self.storage.as_local_file(job.file_path) as audio_path:
+                result = await self.pipeline.run(audio_path)
+            version = self.store.save_transcript(job_id, result.to_dict())
+            self.store.mark_completed(
+                job_id, language=result.language, duration_seconds=result.duration
+            )
+        except Exception as exc:
+            await self._handle_failure(job, exc)
+            return
+
+        logger.info(
+            "job completed",
+            extra={
+                "worker": self.name,
+                "job_id": job_id,
+                "transcript_version": version,
+                "duration_seconds": result.duration,
+                "segments": len(result.segments),
+            },
+        )
+
+    async def _handle_failure(self, job: Job, exc: Exception) -> None:
+        code, message = describe_error(exc)
+        self.store.mark_failed(job.id, code, message)
+        logger.error(
+            "job failed",
+            extra={"worker": self.name, "job_id": job.id, "error_code": code},
+        )
+
+
+def describe_error(exc: BaseException) -> tuple[str, str]:
+    """Map an exception to a stable ``(error_code, message)`` for the job row.
+
+    Domain errors (``AudioProcessingError``) carry their own code; anything
+    else is recorded as ``internal_error`` with its type, so raw exception
+    text from third-party libraries never becomes the whole public message.
+    """
+    code = getattr(exc, "error_code", None)
+    if isinstance(code, str) and code:
+        return code, str(exc)
+    return "internal_error", f"{type(exc).__name__}: {exc}"[:1000]

@@ -23,18 +23,21 @@ _KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._
 
 
 class StorageError(Exception):
-    pass
+    # Stable codes, recorded on the job row when a storage fault fails a job.
+    error_code = "storage_error"
 
 
 class InvalidKeyError(StorageError, ValueError):
-    pass
+    error_code = "invalid_storage_key"
 
 
 class ObjectNotFoundError(StorageError, FileNotFoundError):
-    pass
+    error_code = "audio_not_found"
 
 
 class ObjectTooLargeError(StorageError):
+    error_code = "file_too_large"
+
     def __init__(self, max_bytes: int) -> None:
         super().__init__(f"Object exceeds the {max_bytes}-byte limit")
         self.max_bytes = max_bytes
