@@ -29,15 +29,22 @@ def make_tone_wav(
     path.parent.mkdir(parents=True, exist_ok=True)
     n_frames = round(seconds * sample_rate)
     amplitude = 0.3 * 32767
-    frames = bytearray()
-    for i in range(n_frames):
-        sample = int(amplitude * math.sin(2 * math.pi * frequency * i / sample_rate))
-        frames += struct.pack("<h", sample) * channels
+    # Build one second of audio and tile it: with an integer frequency the
+    # tone completes whole cycles each second, so the repeats join seamlessly,
+    # and multi-minute test files take milliseconds instead of seconds.
+    one_second = b"".join(
+        struct.pack("<h", int(amplitude * math.sin(2 * math.pi * frequency * i / sample_rate)))
+        * channels
+        for i in range(sample_rate)
+    )
+    frame_bytes = 2 * channels
+    full_seconds, rest = divmod(n_frames, sample_rate)
+    frames = one_second * full_seconds + one_second[: rest * frame_bytes]
     with wave.open(str(path), "wb") as w:
         w.setnchannels(channels)
         w.setsampwidth(2)
         w.setframerate(sample_rate)
-        w.writeframes(bytes(frames))
+        w.writeframes(frames)
     return path
 
 
