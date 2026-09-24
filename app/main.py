@@ -25,7 +25,6 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
-    HTTPException,
     Request,
     Response,
     Query,
@@ -33,7 +32,9 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.security import APIKeyHeader
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
 from app.audio import AudioProcessingError, probe_duration_seconds
@@ -79,6 +80,97 @@ def get_services(request: Request) -> Services:
     return request.app.state.services
 
 
+# --- errors -----------------------------------------------------------------
+
+
+class ApiError(Exception):
+    """An expected failure with a stable ``error_code``, rendered as ErrorResponse."""
+
+    def __init__(
+        self,
+        status_code: int,
+        error_code: str,
+        detail: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.detail = detail
+        self.headers = headers
+
+
+# Codes for errors raised by the framework itself rather than our code
+# (unknown route, wrong method, ...).
+DEFAULT_ERROR_CODES = {
+    400: "bad_request",
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    405: "method_not_allowed",
+    413: "file_too_large",
+    422: "validation_error",
+    429: "rate_limited",
+}
+
+
+def error_response(
+    status_code: int, error_code: str, detail: str, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    body = ErrorResponse(error_code=error_code, detail=detail).model_dump()
+    return JSONResponse(status_code=status_code, content=body, headers=headers)
+
+
+def _describe_validation_error(exc: RequestValidationError) -> str:
+    parts = []
+    for error in exc.errors():
+        location = ".".join(str(p) for p in error.get("loc", ()) if p != "body")
+        parts.append(f"{location}: {error.get('msg')}" if location else str(error.get("msg")))
+    return "; ".join(parts) or "Invalid request."
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Every non-2xx response gets the same ``{error_code, detail}`` body."""
+
+    @app.exception_handler(ApiError)
+    async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
+        return error_response(exc.status_code, exc.error_code, exc.detail, exc.headers)
+
+    @app.exception_handler(AudioProcessingError)
+    async def handle_audio_error(request: Request, exc: AudioProcessingError) -> JSONResponse:
+        return error_response(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.error_code, exc.message)
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "validation_error",
+            _describe_validation_error(exc),
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def handle_http_exception(
+        request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
+        code = DEFAULT_ERROR_CODES.get(exc.status_code, "http_error")
+        return error_response(exc.status_code, code, str(exc.detail), exc.headers)
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+        # Full traceback goes to the logs; the caller gets a stable code and
+        # no internals.
+        logger.exception(
+            "unhandled error", extra={"path": request.url.path, "method": request.method}
+        )
+        return error_response(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "An unexpected error occurred.",
+        )
+
+
 # --- auth + rate limiting ----------------------------------------------------
 
 api_key_header = APIKeyHeader(
@@ -113,9 +205,10 @@ def require_api_key(
         hmac.compare_digest(api_key.encode("utf-8"), valid.encode("utf-8"))
         for valid in services.settings.api_keys
     ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid API key.",
+        raise ApiError(
+            status.HTTP_401_UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid API key.",
             headers={"WWW-Authenticate": "APIKey"},
         )
 
@@ -126,9 +219,10 @@ def require_api_key(
         "X-RateLimit-Remaining": str(decision.remaining),
     }
     if not decision.allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Retry in {decision.retry_after_seconds}s.",
+        raise ApiError(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "rate_limited",
+            f"Rate limit exceeded. Retry in {decision.retry_after_seconds}s.",
             headers={**rate_headers, "Retry-After": str(decision.retry_after_seconds)},
         )
     response.headers.update(rate_headers)
@@ -139,7 +233,7 @@ router = APIRouter(prefix=API_PREFIX, dependencies=[Depends(require_api_key)])
 
 ERROR_RESPONSES = {
     code: {"model": ErrorResponse}
-    for code in (400, 401, 404, 413, 422, 429)
+    for code in (400, 401, 404, 413, 422, 429, 500)
 }
 
 
@@ -167,9 +261,10 @@ async def create_transcription(
     extension = Path(filename).suffix.lower()
     if not filename or extension not in settings.allowed_extensions:
         allowed = ", ".join(sorted(settings.allowed_extensions))
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type {extension or '(none)'!r}. Allowed: {allowed}.",
+        raise ApiError(
+            status.HTTP_400_BAD_REQUEST,
+            "unsupported_format",
+            f"Unsupported file type {extension or '(none)'!r}. Allowed: {allowed}.",
         )
 
     job_id = uuid.uuid4().hex
@@ -180,9 +275,10 @@ async def create_transcription(
             services.storage.save, key, file.file, settings.max_upload_bytes
         )
     except ObjectTooLargeError:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds the {settings.max_upload_bytes}-byte upload limit.",
+        raise ApiError(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            "file_too_large",
+            f"File exceeds the {settings.max_upload_bytes}-byte upload limit.",
         )
     finally:
         await file.close()
@@ -195,11 +291,9 @@ async def create_transcription(
             duration = await asyncio.to_thread(probe_duration_seconds, path)
     except AudioProcessingError as exc:
         services.storage.delete(key)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            # Report the caller's filename, not our internal storage key.
-            detail=exc.message.replace(key, filename),
-        )
+        # Re-raised for the global handler (-> 422 with the specific code),
+        # naming the caller's filename rather than our internal storage key.
+        raise AudioProcessingError(exc.error_code, exc.message.replace(key, filename)) from exc
 
     job = services.store.create_job(
         user_id=caller_id,
@@ -235,7 +329,7 @@ async def get_transcription(
     # Another caller's job is indistinguishable from a missing one, so job
     # ids can't be probed to learn what other callers have submitted.
     if job is None or job.user_id != caller_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "job_not_found", "Job not found.")
 
     transcript = None
     if job.status == JobStatus.COMPLETED:
@@ -389,15 +483,14 @@ def create_app(
             declared = request.headers.get("content-length")
             limit = request.app.state.services.settings.max_upload_bytes
             if declared and declared.isdigit() and int(declared) > limit + MULTIPART_OVERHEAD_BYTES:
-                return JSONResponse(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    content={
-                        "error_code": "file_too_large",
-                        "detail": f"File exceeds the {limit}-byte upload limit.",
-                    },
+                return error_response(
+                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    "file_too_large",
+                    f"File exceeds the {limit}-byte upload limit.",
                 )
         return await call_next(request)
 
+    install_error_handlers(app)
     app.include_router(router)
     return app
 
