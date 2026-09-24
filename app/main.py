@@ -28,6 +28,7 @@ from fastapi import (
     HTTPException,
     Request,
     Response,
+    Query,
     Security,
     UploadFile,
     status,
@@ -39,9 +40,16 @@ from app.audio import AudioProcessingError, probe_duration_seconds
 from app.config import Settings, get_settings
 from app.queue_backend import InMemoryQueue
 from app.rate_limit import RateLimiter
-from app.schemas import ErrorResponse, JobCreatedResponse
+from app.schemas import (
+    ErrorResponse,
+    JobCreatedResponse,
+    JobListResponse,
+    JobResponse,
+    JobSummary,
+    TranscriptOut,
+)
 from app.storage_backend import LocalDiskStorage, ObjectTooLargeError
-from app.store import JobStatus, JobStore
+from app.store import MAX_LIST_LIMIT, JobStatus, JobStore
 from app.transcription_engine import TranscriptionEngine, get_engine
 from app.worker import TranscriptionPipeline, Worker, write_dead_letter
 
@@ -209,6 +217,59 @@ async def create_transcription(
         job_id=job.id,
         status=job.status,
         status_url=f"{API_PREFIX}/transcriptions/{job.id}",
+    )
+
+
+@router.get(
+    "/transcriptions/{job_id}",
+    response_model=JobResponse,
+    responses={k: v for k, v in ERROR_RESPONSES.items() if k in (401, 404, 429)},
+    summary="Get a job's status and, once completed, its transcript",
+)
+async def get_transcription(
+    job_id: str,
+    caller_id: str = Depends(require_api_key),
+    services: Services = Depends(get_services),
+) -> JobResponse:
+    job = services.store.get_job(job_id)
+    # Another caller's job is indistinguishable from a missing one, so job
+    # ids can't be probed to learn what other callers have submitted.
+    if job is None or job.user_id != caller_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+
+    transcript = None
+    if job.status == JobStatus.COMPLETED:
+        content = await asyncio.to_thread(services.store.get_transcript, job.id)
+        if content is not None:
+            transcript = TranscriptOut(version=job.trans_version, **content)
+    return JobResponse.from_job(job, transcript=transcript)
+
+
+@router.get(
+    "/transcriptions",
+    response_model=JobListResponse,
+    responses={k: v for k, v in ERROR_RESPONSES.items() if k in (401, 422, 429)},
+    summary="List your jobs, newest first",
+)
+async def list_transcriptions(
+    limit: int = Query(20, ge=1, le=MAX_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
+    status_filter: JobStatus | None = Query(None, alias="status"),
+    caller_id: str = Depends(require_api_key),
+    services: Services = Depends(get_services),
+) -> JobListResponse:
+    """Summaries only (no transcript text), so listing stays cheap; fetch a
+    single job for its transcript."""
+    store = services.store
+    jobs = store.list_jobs(caller_id, limit=limit, offset=offset, status=status_filter)
+    has_more = bool(
+        store.list_jobs(caller_id, limit=1, offset=offset + limit, status=status_filter)
+    )
+    return JobListResponse(
+        items=[JobSummary.from_job(job) for job in jobs],
+        limit=limit,
+        offset=offset,
+        next_offset=offset + limit if has_more else None,
     )
 
 
