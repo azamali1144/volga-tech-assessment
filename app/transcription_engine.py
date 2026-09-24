@@ -89,6 +89,8 @@ class EngineUnavailableError(RuntimeError):
     job won't help; the worker treats it as a permanent failure.
     """
 
+    error_code = "engine_unavailable"
+
 
 class WhisperEngine:
     """OpenAI Whisper, run locally.

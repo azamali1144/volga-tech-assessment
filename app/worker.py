@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 
@@ -149,16 +151,28 @@ class Worker:
         storage: ObjectStorage,
         pipeline: TranscriptionPipeline,
         *,
+        max_retries: int = 3,
+        retry_backoff_base_seconds: float = 2.0,
+        dead_letter_dir: str | Path = "storage/dead_letter",
         poll_timeout_seconds: float = 1.0,
         name: str = "worker",
     ) -> None:
+        if max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
         self.store = store
         self.queue = queue
         self.storage = storage
         self.pipeline = pipeline
+        self.max_retries = max_retries
+        self.retry_backoff_base_seconds = retry_backoff_base_seconds
+        self.dead_letter_dir = Path(dead_letter_dir)
         self.poll_timeout_seconds = poll_timeout_seconds
         self.name = name
         self._stopping = asyncio.Event()
+
+    def backoff_seconds(self, retry_number: int) -> float:
+        """Delay before retry ``retry_number`` (1-based): base * 2^(n-1)."""
+        return self.retry_backoff_base_seconds * 2 ** (retry_number - 1)
 
     def stop(self) -> None:
         """Ask ``run_forever`` to exit after the current job (graceful)."""
@@ -221,12 +235,99 @@ class Worker:
         )
 
     async def _handle_failure(self, job: Job, exc: Exception) -> None:
+        """Retry transient failures with exponential backoff; dead-letter the rest.
+
+        ``job`` is the row as claimed for this attempt, so ``job.retry_count``
+        is the number of retries already used. A job gets at most
+        ``1 + max_retries`` attempts in total.
+        """
         code, message = describe_error(exc)
-        self.store.mark_failed(job.id, code, message)
+        attempt = job.retry_count + 1
+        retryable = is_retryable(code)
+
+        if retryable and job.retry_count < self.max_retries:
+            retrying = self.store.mark_retrying(job.id, code, message)
+            delay = self.backoff_seconds(retrying.retry_count)
+            # Delayed re-enqueue: the worker moves straight on to other jobs
+            # instead of sleeping through the backoff.
+            await self.queue.enqueue_after(job.id, delay)
+            logger.warning(
+                "job attempt failed; retry scheduled",
+                extra={
+                    "worker": self.name,
+                    "job_id": job.id,
+                    "attempt": attempt,
+                    "error_code": code,
+                    "retry_in_seconds": delay,
+                },
+            )
+            return
+
+        reason = "retries_exhausted" if retryable else "non_retryable"
+        failed = self.store.mark_failed(job.id, code, message)
+        self._write_dead_letter(failed, attempts=attempt, reason=reason)
         logger.error(
-            "job failed",
-            extra={"worker": self.name, "job_id": job.id, "error_code": code},
+            "job failed permanently",
+            extra={
+                "worker": self.name,
+                "job_id": job.id,
+                "attempts": attempt,
+                "error_code": code,
+                "reason": reason,
+            },
         )
+
+    def _write_dead_letter(self, job: Job, *, attempts: int, reason: str) -> None:
+        """Record a permanently failed job for manual review.
+
+        The database row (status=failed) is the source of truth; this file is
+        the review queue — in production, a real dead-letter queue (SQS DLQ).
+        A failure to write it is logged but never raised: the job is already
+        correctly marked failed.
+        """
+        record = {
+            "job_id": job.id,
+            "user_id": job.user_id,
+            "original_filename": job.original_filename,
+            "file_path": job.file_path,
+            "error_code": job.error_code,
+            "error_message": job.error_message,
+            "attempts": attempts,
+            "reason": reason,
+            "failed_at": job.failed_at,
+            "worker": self.name,
+        }
+        try:
+            self.dead_letter_dir.mkdir(parents=True, exist_ok=True)
+            path = self.dead_letter_dir / f"{job.id}.json"
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            logger.exception(
+                "could not write dead-letter record", extra={"job_id": job.id}
+            )
+
+
+# Failures that another attempt can't fix: the input itself is bad or gone,
+# or the deployment can't transcribe at all. Everything else (engine crashes,
+# timeouts, I/O hiccups, unexpected exceptions) is treated as transient.
+NON_RETRYABLE_ERROR_CODES = frozenset(
+    {
+        "invalid_audio",
+        "normalization_failed",
+        "file_not_found",
+        "audio_not_found",
+        "file_too_large",
+        "invalid_storage_key",
+        "ffmpeg_not_found",
+        "engine_unavailable",
+    }
+)
+
+
+def is_retryable(error_code: str) -> bool:
+    return error_code not in NON_RETRYABLE_ERROR_CODES
 
 
 def describe_error(exc: BaseException) -> tuple[str, str]:
