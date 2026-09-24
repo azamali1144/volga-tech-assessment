@@ -8,6 +8,8 @@ timestamps map to UUID/TIMESTAMPTZ; INTEGER/REAL map directly).
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -47,6 +49,10 @@ TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
 
 class JobNotFoundError(LookupError):
     pass
+
+
+class TranscriptStorageError(RuntimeError):
+    """A transcript row points at a file that can't be read."""
 
 
 class InvalidTransitionError(RuntimeError):
@@ -128,10 +134,21 @@ class JobStore:
     opened with ``check_same_thread=False`` and every access goes through a
     lock. Queries are tiny, so the lock is never held for long; a Postgres
     version would use a connection pool instead.
+
+    Transcripts whose JSON is at most ``inline_max_chars`` are stored in the
+    ``transcripts`` row; larger ones are written to ``transcript_dir`` and only
+    the path is stored, keeping the table small and fast for the common case.
     """
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        transcript_dir: str | Path = "storage/transcripts",
+        inline_max_chars: int = 20_000,
+    ) -> None:
         self.db_path = str(db_path)
+        self.transcript_dir = Path(transcript_dir)
+        self.inline_max_chars = inline_max_chars
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -268,3 +285,94 @@ class JobStore:
             "error_code = ?, error_message = ?, failed_at = ?",
             (error_code, error_message, utc_now()),
         )
+
+    # --- transcripts ------------------------------------------------------
+
+    def save_transcript(self, job_id: str, content: dict[str, Any]) -> int:
+        """Store a new transcript version for ``job_id``; return its version.
+
+        Versions start at 1 and increment on every save (e.g. reprocessing),
+        and ``jobs.trans_version`` always points at the latest. Old versions
+        are kept for auditability. Content is any JSON-serializable dict, so
+        the store stays independent of the engine's result types.
+        """
+        payload = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+        char_count = len(payload)
+        inline = char_count <= self.inline_max_chars
+
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT trans_version FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            version = row["trans_version"] + 1
+
+            content_path = None
+            if not inline:
+                content_path = self._write_transcript_file(job_id, version, payload)
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO transcripts (job_id, version, content, content_path,
+                                             char_count, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        version,
+                        payload if inline else None,
+                        str(content_path) if content_path else None,
+                        char_count,
+                        utc_now(),
+                    ),
+                )
+                self._conn.execute(
+                    "UPDATE jobs SET trans_version = ?, updated_at = ? WHERE id = ?",
+                    (version, utc_now(), job_id),
+                )
+            except BaseException:
+                # The row never committed, so don't leave an orphaned file.
+                if content_path is not None:
+                    content_path.unlink(missing_ok=True)
+                raise
+        return version
+
+    def _write_transcript_file(self, job_id: str, version: int, payload: str) -> Path:
+        self.transcript_dir.mkdir(parents=True, exist_ok=True)
+        path = self.transcript_dir / f"{job_id}.v{version}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)  # atomic: readers never see a half-written file
+        return path
+
+    def get_transcript(
+        self, job_id: str, version: int | None = None
+    ) -> dict[str, Any] | None:
+        """Return a transcript (latest version by default), or None if absent."""
+        with self._lock:
+            if version is None:
+                row = self._conn.execute(
+                    """
+                    SELECT t.content, t.content_path FROM transcripts t
+                    JOIN jobs j ON j.id = t.job_id AND j.trans_version = t.version
+                    WHERE t.job_id = ?
+                    """,
+                    (job_id,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT content, content_path FROM transcripts "
+                    "WHERE job_id = ? AND version = ?",
+                    (job_id, version),
+                ).fetchone()
+        if row is None:
+            return None
+        if row["content"] is not None:
+            return json.loads(row["content"])
+        try:
+            return json.loads(Path(row["content_path"]).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise TranscriptStorageError(
+                f"Transcript file for job {job_id} is missing or unreadable"
+            ) from exc
