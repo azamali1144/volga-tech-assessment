@@ -259,6 +259,7 @@ class WorkerTest(_TempDirCase):
         self.assertEqual(record["reason"], "retries_exhausted")
         self.assertEqual(record["error_code"], "internal_error")
         self.assertEqual(record["failed_at"], failed.failed_at)
+        self.assertEqual(record["source"], "w0")
 
     async def test_non_retryable_failure_is_dead_lettered_without_retrying(self):
         engine = RecordingEngine()

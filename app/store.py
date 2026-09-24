@@ -244,6 +244,20 @@ class JobStore:
             rows = self._conn.execute(sql, params).fetchall()
         return [Job.from_row(row) for row in rows]
 
+    def list_unfinished_jobs(self) -> list[Job]:
+        """Jobs not yet completed/failed, across all users, oldest first.
+
+        Used at startup to recover work: the in-memory queue doesn't survive a
+        restart, but the database does.
+        """
+        terminal = [s.value for s in TERMINAL_STATUSES]
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs WHERE status NOT IN (?, ?) ORDER BY created_at, rowid",
+                terminal,
+            ).fetchall()
+        return [Job.from_row(row) for row in rows]
+
     # --- status transitions -----------------------------------------------
 
     def _transition(

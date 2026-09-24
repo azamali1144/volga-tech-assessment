@@ -278,35 +278,42 @@ class Worker:
         )
 
     def _write_dead_letter(self, job: Job, *, attempts: int, reason: str) -> None:
-        """Record a permanently failed job for manual review.
+        write_dead_letter(
+            self.dead_letter_dir, job, attempts=attempts, reason=reason, source=self.name
+        )
 
-        The database row (status=failed) is the source of truth; this file is
-        the review queue — in production, a real dead-letter queue (SQS DLQ).
-        A failure to write it is logged but never raised: the job is already
-        correctly marked failed.
-        """
-        record = {
-            "job_id": job.id,
-            "user_id": job.user_id,
-            "original_filename": job.original_filename,
-            "file_path": job.file_path,
-            "error_code": job.error_code,
-            "error_message": job.error_message,
-            "attempts": attempts,
-            "reason": reason,
-            "failed_at": job.failed_at,
-            "worker": self.name,
-        }
-        try:
-            self.dead_letter_dir.mkdir(parents=True, exist_ok=True)
-            path = self.dead_letter_dir / f"{job.id}.json"
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
-            os.replace(tmp, path)
-        except OSError:
-            logger.exception(
-                "could not write dead-letter record", extra={"job_id": job.id}
-            )
+
+def write_dead_letter(
+    dead_letter_dir: str | Path, job: Job, *, attempts: int, reason: str, source: str
+) -> None:
+    """Record a permanently failed job for manual review.
+
+    The database row (status=failed) is the source of truth; this file is the
+    review queue — in production, a real dead-letter queue (SQS DLQ). A
+    failure to write it is logged but never raised: the job is already
+    correctly marked failed.
+    """
+    record = {
+        "job_id": job.id,
+        "user_id": job.user_id,
+        "original_filename": job.original_filename,
+        "file_path": job.file_path,
+        "error_code": job.error_code,
+        "error_message": job.error_message,
+        "attempts": attempts,
+        "reason": reason,
+        "failed_at": job.failed_at,
+        "source": source,
+    }
+    try:
+        directory = Path(dead_letter_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{job.id}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.exception("could not write dead-letter record", extra={"job_id": job.id})
 
 
 # Failures that another attempt can't fix: the input itself is bad or gone,

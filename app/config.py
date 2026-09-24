@@ -71,6 +71,9 @@ class Settings:
     # --- Worker / retries ---
     max_retries: int = 3
     retry_backoff_base_seconds: float = 2.0
+    # Worker tasks in this process. Whisper runs one transcription at a time
+    # per model, so for real throughput scale worker *processes* instead.
+    worker_count: int = 1
 
     # --- Persistence ---
     storage_dir: Path = Path("storage")
@@ -112,6 +115,7 @@ class Settings:
             "max_upload_bytes",
             "max_concurrent_chunk_transcriptions",
             "rate_limit_requests",
+            "worker_count",
             "inline_transcript_max_chars",
         ):
             if getattr(self, name) <= 0:
@@ -171,6 +175,7 @@ class Settings:
             retry_backoff_base_seconds=_env_float(
                 "RETRY_BACKOFF_BASE_SECONDS", d.retry_backoff_base_seconds
             ),
+            worker_count=_env_int("WORKER_COUNT", d.worker_count),
             storage_dir=storage_dir,
             inline_transcript_max_chars=_env_int(
                 "INLINE_TRANSCRIPT_MAX_CHARS", d.inline_transcript_max_chars
