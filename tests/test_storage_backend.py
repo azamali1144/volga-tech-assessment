@@ -77,8 +77,9 @@ class LocalDiskStorageTest(unittest.TestCase):
                     self.storage.save(key, io.BytesIO(b"x"))
                 with self.assertRaises(InvalidKeyError):
                     self.storage.exists(key)
+        # Nothing was written anywhere outside the storage root.
         outside = [p for p in Path(self._tmp.name).rglob("*") if not p.is_relative_to(self.root)]
-        self.assertEqual(outside, [self.root])  # only the root dir itself
+        self.assertEqual(outside, [])
 
     def test_missing_object(self):
         with self.assertRaises(ObjectNotFoundError):
