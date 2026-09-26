@@ -21,7 +21,12 @@ TIMESTAMP_PRECISION = 2  # seconds, rounded to 10ms
 
 @dataclass(frozen=True)
 class Word:
-    """One word with its own timing, on the same timeline as its segment."""
+    """One word with its own timing, on the same timeline as its segment.
+
+    Following Whisper's convention, ``text`` includes any leading space
+    (" quarter", but "%" or "," attached to the previous word), so joining
+    words with ``join_words`` reproduces the original spacing exactly.
+    """
 
     start: float
     end: float
@@ -187,7 +192,7 @@ class WhisperEngine:
                 Word(
                     start=round(float(w["start"]), TIMESTAMP_PRECISION),
                     end=round(float(w["end"]), TIMESTAMP_PRECISION),
-                    text=str(w["word"]).strip(),
+                    text=str(w["word"]),  # keeps Whisper's leading space
                 )
                 for w in seg.get("words") or ()
                 if str(w.get("word", "")).strip()
@@ -274,7 +279,7 @@ class MockEngine:
             Word(
                 start=round(start + i * step, TIMESTAMP_PRECISION),
                 end=round(end if i == len(tokens) - 1 else start + (i + 1) * step, TIMESTAMP_PRECISION),
-                text=token,
+                text=f" {token}",  # Whisper-style leading space
             )
             for i, token in enumerate(tokens)
         )
@@ -306,40 +311,38 @@ def merge_chunk_results(
     Chunks overlap (see ``app.audio.plan_chunks``), so speech in an overlap
     region is transcribed twice. The rules:
 
-    1. **Shift.** Segment times are chunk-local; add the chunk's ``start`` to
-       put them on the global timeline.
-    2. **Partition at overlap midpoints.** Each overlap ``[next.start,
-       prev.end]`` gets one cut at its midpoint, splitting the timeline into
-       half-open ownership regions ``[cut_before, cut_after)``, one per chunk.
-       The midpoint is chosen over "wherever the previous chunk ends" because
-       audio right at a chunk's edge is where a model hears the least context
-       and is most likely to mishear or clip a word; the midpoint keeps every
-       kept segment at least ``overlap / 2`` seconds away from the edge of the
-       chunk it came from.
-    3. **Assign by segment center.** Walking chunks in order, a segment is
-       kept if its center is before this chunk's cut (upper bound) and at or
-       after the end of the last segment already kept (lower bound). The
-       upper bound hands anything centered on or after the cut to the next
-       chunk; a segment centered *exactly* on the cut therefore belongs to
-       the later chunk (half-open interval) — kept once, never twice, never
-       dropped. The lower bound is "where the transcript so far ends" rather
-       than the fixed cut, so when two chunks segment the seam differently,
-       the later chunk picks up exactly where the earlier one stopped instead
-       of both discarding the same stretch and leaving a hole.
-    4. **Clamp to keep the timeline monotonic.** A kept segment that starts
-       before the previous one ends has its start clamped to that end, so
-       timestamps never go backwards or overlap.
+    1. **Shift.** Times are chunk-local; add the chunk's ``start`` to put them
+       on the global timeline.
+    2. **Cut each overlap at its midpoint.** Each overlap ``[next.start,
+       prev.end]`` gets one cut at its midpoint. Audio right at a chunk's edge
+       is where a model hears the least context and most often clips or
+       mishears a word; cutting at the midpoint means everything kept is at
+       least ``overlap / 2`` seconds from the edge of the chunk it came from.
+    3. **Keep by center.** Walking chunks in order, an item is kept if its
+       center is before this chunk's cut (upper bound) and at or after the end
+       of what has been kept so far (lower bound). An item centered *exactly*
+       on the cut belongs to the later chunk (half-open interval): kept once,
+       never twice, never dropped. Using "where the transcript so far ends" as
+       the lower bound, rather than the fixed cut, means the later chunk picks
+       up exactly where the earlier one stopped, so no stretch falls between.
+    4. **Clamp** so timestamps never go backwards or overlap.
 
-    Known limit: this works at segment granularity, and segments are atomic —
-    a segment's text can't be split by time. When both chunks segment the seam
-    identically (the common case: same speech, same pauses), the result is
-    exactly what a single pass would produce. When they don't, the center rule
-    means a segment is kept iff *most* of it is new audio, so the error at a
-    seam is bounded by half a segment either way: at worst part of a segment's
-    words repeat, or a stretch shorter than half a segment is dropped. An
-    overlap comfortably longer than typical segments makes both rare;
-    word-level timestamps (Whisper's ``word_timestamps=True``) with the same
-    rule would shrink the bound to a single word.
+    **Granularity.** When every segment carries word timings (Whisper with
+    ``word_timestamps=True``), the rules apply to individual *words*. A word
+    lasts well under a second and the cut sits ``overlap / 2`` from either
+    chunk edge, so any word near the cut was heard in full by both chunks:
+    a word clipped at a chunk edge is replaced by the neighbour's complete
+    one, and nothing is lost or repeated at the seam. Segments are then
+    rebuilt from the words each chunk kept, preserving the chunks' segment
+    boundaries; a sentence split by the cut (its start kept by one chunk, its
+    end by the next) is joined back into one segment. As a guard against
+    word-timing jitter between chunks, a chunk's first kept word is skipped
+    if it is the previous word again (same text, overlapping in time).
+
+    Without word timings, the same rules apply to whole segments. That is
+    exact when both chunks segment the seam identically, but because a
+    segment can't be split, a seam error of up to half a segment (a few
+    repeated or dropped words) is possible when they don't.
 
     The same idea (keep the middle of each chunk's window, discard the edges)
     is what Hugging Face's ASR pipeline does with ``stride_length_s``.
@@ -359,6 +362,125 @@ def merge_chunk_results(
     ]
     upper_bounds = [*cuts, float("inf")]
 
+    all_segments = [seg for _, result in pairs for seg in result.segments]
+    if all_segments and all(seg.words for seg in all_segments):
+        segments = _merge_by_words(pairs, upper_bounds)
+    else:
+        segments = _merge_by_segments(pairs, upper_bounds)
+
+    languages = [r.language for _, r in pairs if r.language]
+    return TranscriptionResult(
+        text=" ".join(s.text for s in segments),
+        segments=segments,
+        # Most common detected language; ties go to the earliest chunk.
+        language=max(languages, key=languages.count) if languages else None,
+        duration=round(ordered_chunks[-1].end, TIMESTAMP_PRECISION),
+    )
+
+
+def join_words(words: Sequence[Word]) -> str:
+    return "".join(w.text for w in words).strip()
+
+
+def _normalize_word(text: str) -> str:
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def _merge_by_words(
+    pairs: list[tuple[AudioChunk, TranscriptionResult]], upper_bounds: list[float]
+) -> list[Segment]:
+    segments: list[Segment] = []
+    kept_until = float("-inf")
+    last_word: Word | None = None
+    # Whether the last emitted segment lost trailing words to the cut, i.e. a
+    # sentence the next chunk will finish.
+    tail_cut = False
+
+    for (chunk, result), upper in zip(pairs, upper_bounds):
+        first_in_chunk = True
+        for seg in sorted(result.segments, key=lambda s: (s.start, s.end)):
+            kept: list[Word] = []
+            head_cut = False  # words dropped before the first kept one
+            seg_tail_cut = False  # words dropped after the last kept one
+            for word in sorted(seg.words, key=lambda w: (w.start, w.end)):
+                start, end = word.start + chunk.start, word.end + chunk.start
+                center = (start + end) / 2
+                if center >= upper:
+                    seg_tail_cut = True
+                    continue
+                if center < kept_until:
+                    head_cut = head_cut or not kept
+                    continue
+                if (
+                    first_in_chunk
+                    and last_word is not None
+                    and start < last_word.end
+                    and _normalize_word(word.text) == _normalize_word(last_word.text)
+                ):
+                    # The previous chunk's last word again, with its timing
+                    # shifted just past the cut: the same word, not a repeat.
+                    # (A genuinely repeated word starts after the first ends.)
+                    first_in_chunk = False
+                    head_cut = head_cut or not kept
+                    continue
+                first_in_chunk = False
+                start = max(start, kept_until)
+                if start >= end:
+                    continue
+                last_word = Word(
+                    start=round(start, TIMESTAMP_PRECISION),
+                    end=round(end, TIMESTAMP_PRECISION),
+                    text=word.text,
+                )
+                kept.append(last_word)
+                kept_until = end
+            if not kept:
+                continue
+
+            if head_cut and tail_cut and segments:
+                # The previous chunk kept the start of this sentence and this
+                # chunk its end: join them back into one segment.
+                prev = segments[-1]
+                words = prev.words + tuple(kept)
+                segments[-1] = Segment(
+                    id=prev.id,
+                    start=prev.start,
+                    end=kept[-1].end,
+                    text=join_words(words),
+                    words=words,
+                )
+            elif not head_cut and not seg_tail_cut:
+                # Fully kept: use the engine's own text and bounds, clamped
+                # after the previous segment.
+                seg_start = round(seg.start + chunk.start, TIMESTAMP_PRECISION)
+                if segments:
+                    seg_start = max(seg_start, segments[-1].end)
+                segments.append(
+                    Segment(
+                        id=len(segments),
+                        start=min(seg_start, kept[0].start),
+                        end=max(round(seg.end + chunk.start, TIMESTAMP_PRECISION), kept[-1].end),
+                        text=seg.text,
+                        words=tuple(kept),
+                    )
+                )
+            else:
+                segments.append(
+                    Segment(
+                        id=len(segments),
+                        start=kept[0].start,
+                        end=kept[-1].end,
+                        text=join_words(kept),
+                        words=tuple(kept),
+                    )
+                )
+            tail_cut = seg_tail_cut
+    return segments
+
+
+def _merge_by_segments(
+    pairs: list[tuple[AudioChunk, TranscriptionResult]], upper_bounds: list[float]
+) -> list[Segment]:
     segments: list[Segment] = []
     kept_until = float("-inf")  # end of the transcript assembled so far
     for (chunk, result), upper in zip(pairs, upper_bounds):
@@ -379,12 +501,4 @@ def merge_chunk_results(
                     text=seg.text,
                 )
             )
-
-    languages = [r.language for _, r in pairs if r.language]
-    return TranscriptionResult(
-        text=" ".join(s.text for s in segments),
-        segments=segments,
-        # Most common detected language; ties go to the earliest chunk.
-        language=max(languages, key=languages.count) if languages else None,
-        duration=round(ordered_chunks[-1].end, TIMESTAMP_PRECISION),
-    )
+    return segments
