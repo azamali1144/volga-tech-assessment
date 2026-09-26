@@ -1,0 +1,5 @@
+# Test-only dependencies. FastAPI's TestClient needs an HTTP client library;
+# current Starlette uses httpx2 (plain httpx still works but is deprecated).
+# Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+httpx2>=2.13

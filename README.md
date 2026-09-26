@@ -69,6 +69,7 @@ docker run -p 8000:8000 -v transcription-data:/data volga-transcription
 **Tests** use the mock engine and synthetic audio, so they need no model and no fixture files:
 
 ```bash
+pip install -r requirements-dev.txt     # adds the HTTP client used by the API tests
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
@@ -286,23 +287,25 @@ In priority order:
 ## Testing
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v    # 135 tests, ~8 s
+pip install -r requirements-dev.txt
+python -m unittest discover -s tests -p "test_*.py" -v    # 161 tests, ~12 s
 ```
 
-The tests generate their own audio (sine tones, via the stdlib or ffmpeg) and use `MockEngine`, so they need no model download and no fixture files. Tests that need ffmpeg are skipped automatically if it isn't installed.
+The tests generate their own audio (sine tones, via the stdlib or ffmpeg) and use `MockEngine`, so they need no model download and no fixture files.
 
 | File | Tests | Covers |
 |---|---:|---|
 | `test_audio.py` | 19 | Duration probing and normalization across formats; chunk maths invariants; sample-exact reconstruction from chunks |
 | `test_transcription_engine.py` | 21 | Mock determinism; Whisper output mapping, lazy single model load and missing-dependency error (with a fake `whisper` module); merge seam cases and single-pass equivalence |
 | `test_store.py` | 27 | Status state machine, including illegal transitions and racing claims; inline vs file transcripts; versioning; integrity constraints; per-user listing and pagination |
-| `test_worker.py` | 24 | Pipeline (single-pass and chunked paths, concurrency limit, temp-file cleanup); worker retry, backoff, dead-letter, duplicate delivery, infrastructure errors, shutdown |
+| `test_api.py` | 25 | The real app through FastAPI's `TestClient`: upload → poll → completed round trip, chunked long audio, every supported format, listing and pagination, per-caller isolation, every error code in the table above, rate limiting, generic 500s, `/healthz`, and restart recovery |
+| `test_worker.py` | 26 | Pipeline (single-pass and chunked paths, concurrency limit, temp-file cleanup); worker retry, backoff, dead-letter, duplicate delivery, infrastructure errors, prompt shutdown |
 | `test_storage_backend.py` | 11 | Round trips, size cap with no partial files, path traversal |
 | `test_rate_limit.py` | 10 | Sliding window, boundary burst, `Retry-After`, memory sweep, thread safety |
 | `test_queue_backend.py` | 7 | FIFO order, timeouts, delayed delivery, shutdown |
 | `test_config.py` / `test_logging_config.py` | 8 / 8 | Env parsing and validation; JSON log output |
 
-The HTTP layer (`app/main.py`) has been verified by hand against a running server (every status code in the error table above, restart recovery, rate-limit headers), but it doesn't have automated tests yet. See [Known limitations](#known-limitations).
+Tests that need ffmpeg or the dev HTTP client are skipped, not failed, when those aren't installed.
 
 ## Configuration
 
@@ -330,4 +333,3 @@ Invalid values stop the service at startup with a message naming the setting, ra
 - **The merge works on whole segments.** A segment's text can't be split at a point in time. When two chunks divide a seam into differently bounded segments, the error at that seam is bounded by half a segment: a few words may repeat, or a stretch shorter than half a segment may be dropped. The fix is Whisper's `word_timestamps=True` with the same centre rule, which bounds the error to a single word.
 - **Retries redo the whole file.** For long audio, retrying only the failed chunks would save work.
 - **Auth is a static API key.** That's fine for service-to-service use in a demo, but not a multi-tenant identity system.
-- **No automated HTTP-layer tests yet.** A `TestClient` suite covering the upload → poll → completed round trip and each error path is the next thing to add.
