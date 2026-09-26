@@ -58,13 +58,23 @@ curl -s http://localhost:8000/api/v1/transcriptions/3f1c… -H "X-API-Key: dev-l
 # {"status":"completed", …, "transcript":{"text":"…","segments":[{"start":0.0,"end":2.1,"text":"…"}, …]}}
 ```
 
-**Docker:**
+**Docker.** These commands have been tested with Docker Desktop on Windows.
 
 ```bash
-docker build -t volga-transcription .                                   # mock engine, small image
-docker build -t volga-transcription --build-arg INSTALL_WHISPER=true .  # with Whisper (CPU)
+# Mock engine: 859 MB image, builds in a few minutes
+docker build -t volga-transcription .
 docker run -p 8000:8000 -v transcription-data:/data volga-transcription
+
+# Real Whisper, CPU-only PyTorch: 3.6 GB image, first build ~15 min
+docker build -t volga-transcription:whisper --build-arg INSTALL_WHISPER=true .
+docker run -p 8000:8000 -e TRANSCRIPTION_ENGINE=whisper \
+  -v transcription-data:/data -v whisper-models:/home/appuser/.cache \
+  volga-transcription:whisper
 ```
+
+- **`/data`** holds all state: audio, transcripts, the SQLite database and dead-letter records. Jobs survive deleting and recreating the container.
+- **The `whisper-models` volume** caches the model. Whisper downloads it on the first job (about 140 MB for `base`). Without the volume, every new container downloads it again: the first job took about 74 s with the download and 9 s once the model was cached.
+- **The container runs as an unprivileged user (uid 10001)** and has a built-in `HEALTHCHECK` that calls `/healthz`.
 
 **Tests** use the mock engine and synthetic audio, so they need no model and no fixture files:
 
@@ -288,7 +298,7 @@ The brief allows mocked infrastructure. The point is that each seam is clean, so
 In priority order:
 
 1. **Durable queue and Postgres.** These are the two places the demo trades durability for zero setup. Startup recovery narrows the gap: queued work survives a restart because the database is the source of truth. A real queue is still needed for multiple processes.
-2. **Workers as separate, autoscaled deployments**, scaled on queue depth (already exposed by `/healthz`). Whisper throughput scales with processes and GPUs, not threads.
+2. **Workers as separate, autoscaled deployments**, scaled on queue depth (already exposed by `/healthz`). Whisper throughput scales with processes and GPUs, not threads. Bake the model into the worker image (or a shared volume) so a new worker never downloads it before its first job.
 3. **Redis-backed rate limiting**, so the limit is shared across API instances.
 4. **Direct-to-S3 uploads via presigned URLs** (`ObjectStorage.presigned_upload_url` is the placeholder), so large files never pass through the API.
 5. **Real identity** (OAuth2/JWT with tenant ids) instead of static API keys.
