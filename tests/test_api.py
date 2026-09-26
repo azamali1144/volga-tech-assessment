@@ -23,7 +23,9 @@ try:
     from app.main import caller_id_for, create_app
 
     CLIENT_AVAILABLE = True
-except ImportError:  # httpx2/httpx not installed
+except (ImportError, RuntimeError):
+    # Starlette's TestClient raises RuntimeError (not ImportError) when no
+    # HTTP client library is installed, i.e. requirements-dev.txt is missing.
     CLIENT_AVAILABLE = False
 
 KEY = "test-key"
