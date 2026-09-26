@@ -32,10 +32,13 @@ RUN pip install -r requirements.txt \
 COPY app ./app
 
 # Run unprivileged; /data holds everything stateful (audio, transcripts,
-# SQLite db, dead-letter records) so it can be a mounted volume.
+# SQLite db, dead-letter records) so it can be a mounted volume. The Whisper
+# model is downloaded on first use into /home/appuser/.cache; creating it here
+# (owned by appuser) means a volume mounted there inherits that ownership
+# instead of being created root-owned and unwritable.
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /data \
-    && chown appuser:appuser /data
+    && mkdir -p /data /home/appuser/.cache \
+    && chown appuser:appuser /data /home/appuser/.cache
 USER appuser
 
 ENV STORAGE_DIR=/data
