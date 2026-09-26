@@ -20,17 +20,46 @@ TIMESTAMP_PRECISION = 2  # seconds, rounded to 10ms
 
 
 @dataclass(frozen=True)
-class Segment:
-    """One timestamped span of speech. Times are seconds from the start of
-    whatever audio was transcribed (a chunk, until merged; then the file)."""
+class Word:
+    """One word with its own timing, on the same timeline as its segment."""
 
-    id: int
     start: float
     end: float
     text: str
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "start": self.start, "end": self.end, "text": self.text}
+        return {"start": self.start, "end": self.end, "text": self.text}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Word":
+        return cls(start=float(data["start"]), end=float(data["end"]), text=str(data["text"]))
+
+
+@dataclass(frozen=True)
+class Segment:
+    """One timestamped span of speech. Times are seconds from the start of
+    whatever audio was transcribed (a chunk, until merged; then the file).
+
+    ``words`` is optional: engines that report word timings fill it, and the
+    chunk merge then works word by word instead of segment by segment.
+    """
+
+    id: int
+    start: float
+    end: float
+    text: str
+    words: tuple[Word, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "id": self.id,
+            "start": self.start,
+            "end": self.end,
+            "text": self.text,
+        }
+        if self.words:
+            data["words"] = [w.to_dict() for w in self.words]
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Segment":
@@ -39,6 +68,7 @@ class Segment:
             start=float(data["start"]),
             end=float(data["end"]),
             text=str(data["text"]),
+            words=tuple(Word.from_dict(w) for w in data.get("words", ())),
         )
 
 
@@ -136,7 +166,12 @@ class WhisperEngine:
         model = self._get_model()
         with self._transcribe_lock:
             raw = model.transcribe(
-                str(audio_path), language=self.language, fp16=self._fp16
+                str(audio_path),
+                language=self.language,
+                fp16=self._fp16,
+                # Per-word timings let the chunk merge cut between words
+                # rather than between whole (multi-second) segments.
+                word_timestamps=True,
             )
         return self._to_result(raw, wav_duration_seconds(audio_path))
 
@@ -148,12 +183,22 @@ class WhisperEngine:
             text = str(seg.get("text", "")).strip()
             if not text:
                 continue
+            words = tuple(
+                Word(
+                    start=round(float(w["start"]), TIMESTAMP_PRECISION),
+                    end=round(float(w["end"]), TIMESTAMP_PRECISION),
+                    text=str(w["word"]).strip(),
+                )
+                for w in seg.get("words") or ()
+                if str(w.get("word", "")).strip()
+            )
             segments.append(
                 Segment(
                     id=len(segments),
                     start=round(float(seg["start"]), TIMESTAMP_PRECISION),
                     end=round(float(seg["end"]), TIMESTAMP_PRECISION),
                     text=text,
+                    words=words,
                 )
             )
         return TranscriptionResult(
@@ -171,15 +216,23 @@ class MockEngine:
     duration, with text naming the segment's time span. The same file always
     yields the same result, and because the output follows the real audio
     length, chunking and merging are exercised exactly as they would be with
-    Whisper. Used by the test suite and for offline development.
+    Whisper. Like Whisper, it reports per-word timings (words evenly spaced
+    across each segment) unless ``word_timestamps=False``, which exercises the
+    segment-level merge fallback. Used by the test suite and offline dev.
     """
 
     name = "mock"
 
-    def __init__(self, segment_seconds: float = 2.0, delay_seconds: float = 0.0) -> None:
+    def __init__(
+        self,
+        segment_seconds: float = 2.0,
+        delay_seconds: float = 0.0,
+        word_timestamps: bool = True,
+    ) -> None:
         if segment_seconds <= 0:
             raise ValueError("segment_seconds must be positive")
         self.segment_seconds = segment_seconds
+        self.word_timestamps = word_timestamps
         # Optional artificial latency, to make queueing/concurrency observable
         # when poking at the running service by hand.
         self.delay_seconds = delay_seconds
@@ -193,12 +246,14 @@ class MockEngine:
         start = 0.0
         while start < duration:
             end = min(start + self.segment_seconds, duration)
+            text = f"mock speech {start:.2f}-{end:.2f}"
             segments.append(
                 Segment(
                     id=len(segments),
                     start=round(start, TIMESTAMP_PRECISION),
                     end=round(end, TIMESTAMP_PRECISION),
-                    text=f"mock speech {start:.2f}-{end:.2f}",
+                    text=text,
+                    words=self._spread_words(text, start, end) if self.word_timestamps else (),
                 )
             )
             start = len(segments) * self.segment_seconds  # no float drift
@@ -207,6 +262,21 @@ class MockEngine:
             segments=segments,
             language="en",
             duration=round(duration, TIMESTAMP_PRECISION),
+        )
+
+
+    @staticmethod
+    def _spread_words(text: str, start: float, end: float) -> tuple[Word, ...]:
+        """Split ``text`` into words evenly spaced over ``[start, end]``."""
+        tokens = text.split()
+        step = (end - start) / len(tokens)
+        return tuple(
+            Word(
+                start=round(start + i * step, TIMESTAMP_PRECISION),
+                end=round(end if i == len(tokens) - 1 else start + (i + 1) * step, TIMESTAMP_PRECISION),
+                text=token,
+            )
+            for i, token in enumerate(tokens)
         )
 
 

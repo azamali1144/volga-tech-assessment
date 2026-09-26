@@ -15,6 +15,7 @@ from app.transcription_engine import (
     TranscriptionEngine,
     TranscriptionResult,
     WhisperEngine,
+    Word,
     get_engine,
     merge_chunk_results,
 )
@@ -48,6 +49,11 @@ class DataShapeTest(unittest.TestCase):
         r = _result((0.0, 1.25, "hi"), (1.5, 2.0, "there"))
         self.assertEqual(TranscriptionResult.from_dict(r.to_dict()), r)
 
+    def test_words_round_trip_and_are_omitted_when_absent(self):
+        seg = Segment(0, 0.0, 1.0, "hi there", words=(Word(0.0, 0.4, "hi"), Word(0.5, 1.0, "there")))
+        self.assertEqual(Segment.from_dict(seg.to_dict()), seg)
+        self.assertNotIn("words", Segment(0, 0.0, 1.0, "hi").to_dict())
+
 
 class MockEngineTest(_TempDirTestCase):
     def test_is_deterministic(self):
@@ -67,6 +73,17 @@ class MockEngineTest(_TempDirTestCase):
 
     def test_satisfies_engine_protocol(self):
         self.assertIsInstance(MockEngine(), TranscriptionEngine)
+
+    def test_words_are_spread_evenly_across_each_segment(self):
+        wav = make_tone_wav(self.tmp / "a.wav", seconds=3.0)
+        first = MockEngine(segment_seconds=3.0).transcribe(wav).segments[0]
+        self.assertEqual([w.text for w in first.words], ["mock", "speech", "0.00-3.00"])
+        self.assertEqual([(w.start, w.end) for w in first.words], [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)])
+
+    def test_word_timestamps_can_be_disabled(self):
+        wav = make_tone_wav(self.tmp / "a.wav", seconds=3.0)
+        result = MockEngine(word_timestamps=False).transcribe(wav)
+        self.assertTrue(all(s.words == () for s in result.segments))
 
     def test_unreadable_input_raises_audio_error(self):
         bad = self.tmp / "bad.wav"
@@ -88,14 +105,30 @@ class _FakeWhisperModel:
     def __init__(self):
         self.calls = []
 
-    def transcribe(self, path, language=None, fp16=None):
-        self.calls.append({"path": path, "language": language, "fp16": fp16})
+    def transcribe(self, path, language=None, fp16=None, word_timestamps=False):
+        self.calls.append(
+            {"path": path, "language": language, "fp16": fp16, "word_timestamps": word_timestamps}
+        )
         return {
             "language": "en",
             "segments": [
-                {"id": 0, "start": 0.0, "end": 1.23456, "text": " Hello world."},
-                {"id": 1, "start": 1.5, "end": 1.9, "text": "   "},
-                {"id": 2, "start": 2.004, "end": 3.999, "text": " How are you?"},
+                {
+                    "id": 0, "start": 0.0, "end": 1.23456, "text": " Hello world.",
+                    "words": [
+                        {"word": " Hello", "start": 0.0, "end": 0.504, "probability": 0.9},
+                        {"word": " world.", "start": 0.6, "end": 1.23456, "probability": 0.9},
+                    ],
+                },
+                {"id": 1, "start": 1.5, "end": 1.9, "text": "   ", "words": []},
+                {
+                    "id": 2, "start": 2.004, "end": 3.999, "text": " How are you?",
+                    "words": [
+                        {"word": " How", "start": 2.004, "end": 2.4, "probability": 0.9},
+                        {"word": " ", "start": 2.4, "end": 2.41, "probability": 0.1},
+                        {"word": " are", "start": 2.41, "end": 2.9, "probability": 0.9},
+                        {"word": " you?", "start": 2.9, "end": 3.999, "probability": 0.9},
+                    ],
+                },
             ],
         }
 
@@ -147,6 +180,17 @@ class WhisperEngineTest(_TempDirTestCase):
         WhisperEngine("tiny", language="fr").transcribe(self.wav)
         self.assertEqual(self.model.calls[0]["fp16"], False)
         self.assertEqual(self.model.calls[0]["language"], "fr")
+
+    def test_requests_and_maps_word_timestamps(self):
+        result = WhisperEngine("tiny").transcribe(self.wav)
+        self.assertTrue(self.model.calls[0]["word_timestamps"])
+        first, second = result.segments
+        self.assertEqual(
+            [(w.start, w.end, w.text) for w in first.words],
+            [(0.0, 0.5, "Hello"), (0.6, 1.23, "world.")],
+        )
+        # Blank words are dropped; the rest keep their own timings.
+        self.assertEqual([w.text for w in second.words], ["How", "are", "you?"])
 
 
 class WhisperEngineMissingDependencyTest(unittest.TestCase):
