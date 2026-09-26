@@ -364,12 +364,22 @@ class WorkerTest(_TempDirCase):
         self.assertEqual(self.store.get_job(first.id).status, JobStatus.QUEUED)
 
     async def test_stop_exits_promptly_when_idle(self):
-        worker = self.start_worker(RecordingEngine())
+        # A long poll timeout proves stop() wakes the idle worker rather than
+        # the worker noticing only when its dequeue times out.
+        worker = self.start_worker(RecordingEngine(), poll_timeout_seconds=10)
         await asyncio.sleep(0.05)
         started = time.monotonic()
         worker.stop()
         await asyncio.wait_for(self.tasks[0], 1)
         self.assertLess(time.monotonic() - started, 0.5)
+
+    async def test_stopping_an_idle_worker_leaves_later_jobs_queued(self):
+        worker = self.start_worker(RecordingEngine(), poll_timeout_seconds=10)
+        await asyncio.sleep(0.05)
+        worker.stop()
+        await asyncio.wait_for(self.tasks[0], 1)
+        await self.queue.enqueue("arrives-after-stop")
+        self.assertEqual(self.queue.size(), 1)  # the cancelled dequeue took nothing
 
     async def test_multiple_workers_drain_many_jobs(self):
         engine = RecordingEngine(delay=0.02)

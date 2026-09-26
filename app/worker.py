@@ -181,9 +181,9 @@ class Worker:
     async def run_forever(self) -> None:
         logger.info("worker started", extra={"worker": self.name})
         while not self._stopping.is_set():
-            job_id = await self.queue.dequeue(timeout=self.poll_timeout_seconds)
+            job_id = await self._next_job()
             if job_id is None:
-                continue  # idle; loop round to re-check for shutdown
+                continue  # idle or stopping; loop round to re-check
             try:
                 await self._process_once(job_id)
             except Exception:
@@ -195,6 +195,30 @@ class Worker:
                     extra={"worker": self.name, "job_id": job_id},
                 )
         logger.info("worker stopped", extra={"worker": self.name})
+
+    async def _next_job(self) -> str | None:
+        """Wait for a job id, but return ``None`` as soon as ``stop()`` is called.
+
+        Without this, an idle worker would only notice shutdown when its
+        dequeue timeout expired, delaying every graceful stop by up to
+        ``poll_timeout_seconds``. Cancelling a pending ``dequeue`` loses
+        nothing: an item is only removed from the queue once the get
+        completes.
+        """
+        dequeue = asyncio.ensure_future(self.queue.dequeue(timeout=self.poll_timeout_seconds))
+        stopping = asyncio.ensure_future(self._stopping.wait())
+        try:
+            await asyncio.wait({dequeue, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopping.cancel()
+        if dequeue.done():
+            return dequeue.result()
+        dequeue.cancel()
+        try:
+            await dequeue
+        except asyncio.CancelledError:
+            pass
+        return None
 
     async def _process_once(self, job_id: str) -> None:
         try:

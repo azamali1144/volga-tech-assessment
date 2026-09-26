@@ -141,14 +141,14 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(AudioProcessingError)
     async def handle_audio_error(request: Request, exc: AudioProcessingError) -> JSONResponse:
-        return error_response(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.error_code, exc.message)
+        return error_response(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.error_code, exc.message)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         return error_response(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "validation_error",
             _describe_validation_error(exc),
         )
@@ -279,7 +279,7 @@ async def create_transcription(
         )
     except ObjectTooLargeError:
         raise ApiError(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status.HTTP_413_CONTENT_TOO_LARGE,
             "file_too_large",
             f"File exceeds the {settings.max_upload_bytes}-byte upload limit.",
         )
@@ -512,7 +512,7 @@ def create_app(
             limit = request.app.state.services.settings.max_upload_bytes
             if declared and declared.isdigit() and int(declared) > limit + MULTIPART_OVERHEAD_BYTES:
                 return error_response(
-                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    status.HTTP_413_CONTENT_TOO_LARGE,
                     "file_too_large",
                     f"File exceeds the {limit}-byte upload limit.",
                 )
