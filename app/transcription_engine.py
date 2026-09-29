@@ -7,6 +7,7 @@ is a configuration choice, not something callers know about.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from typing import Any, Protocol, Sequence, runtime_checkable
 
 from app.audio import AudioChunk, wav_duration_seconds
 from app.config import Settings
+
+logger = logging.getLogger(__name__)
 
 TIMESTAMP_PRECISION = 2  # seconds, rounded to 10ms
 
@@ -161,6 +164,17 @@ class WhisperEngine:
                         raise EngineUnavailableError(
                             "TRANSCRIPTION_ENGINE=whisper requires the openai-whisper "
                             "package: pip install -r requirements-whisper.txt"
+                        ) from exc
+                    except OSError as exc:
+                        # Installed but can't load, e.g. a native DLL blocked by
+                        # Windows Smart App Control or a broken CUDA library. A
+                        # deployment problem, so fail the job once instead of
+                        # retrying; the full cause (with local file paths) goes
+                        # to the server log only, never to API callers.
+                        logger.error("could not load the whisper engine", exc_info=True)
+                        raise EngineUnavailableError(
+                            "The Whisper engine could not be loaded on this server "
+                            "(PyTorch failed to load). See the server logs."
                         ) from exc
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                     self._fp16 = device == "cuda"  # fp16 is unsupported on CPU

@@ -195,11 +195,29 @@ class WhisperEngineTest(_TempDirTestCase):
 
 class WhisperEngineMissingDependencyTest(unittest.TestCase):
     def test_missing_package_raises_engine_unavailable(self):
-        # A None entry in sys.modules makes the import raise ImportError.
-        with mock.patch.dict(sys.modules, {"whisper": None}):
+        # A None entry in sys.modules makes the import raise ImportError. Both
+        # are stubbed so the test doesn't depend on what's really installed.
+        with mock.patch.dict(sys.modules, {"torch": None, "whisper": None}):
             with self.assertRaises(EngineUnavailableError) as ctx:
                 WhisperEngine().transcribe(Path("unused.wav"))
         self.assertIn("requirements-whisper.txt", str(ctx.exception))
+
+    def test_installed_but_unloadable_torch_raises_engine_unavailable(self):
+        # e.g. Windows Smart App Control blocking torch's native DLLs.
+        real_import = __import__
+
+        def blocked_import(name, *args, **kwargs):
+            if name == "torch":
+                raise OSError('[WinError 4551] blocked: "C:\\secret\\torch\\lib\\shm.dll"')
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=blocked_import):
+            with self.assertLogs("app.transcription_engine", level="ERROR") as logs:
+                with self.assertRaises(EngineUnavailableError) as ctx:
+                    WhisperEngine().transcribe(Path("unused.wav"))
+        self.assertEqual(ctx.exception.error_code, "engine_unavailable")
+        self.assertNotIn("secret", str(ctx.exception))  # no local paths to callers
+        self.assertIn("shm.dll", "\n".join(logs.output))  # full cause in the log
 
 
 class MergeSeamCasesTest(unittest.TestCase):
