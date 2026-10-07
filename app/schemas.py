@@ -1,12 +1,3 @@
-"""Pydantic request/response models for the HTTP API.
-
-These are the public contract: FastAPI validates against them and generates
-the OpenAPI docs (``/docs``) from them. They're deliberately separate from the
-internal ``Job`` / ``TranscriptionResult`` types, so internals can change
-without breaking callers, and fields that must not leak (storage keys, user
-ids, raw internal error text) never reach a response.
-"""
-
 from __future__ import annotations
 
 from datetime import datetime
@@ -16,8 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.store import Job, JobStatus
 
-# Internal failures are recorded in full on the job row and in logs; callers
-# get a generic message instead of stack-trace-flavoured exception text.
 INTERNAL_ERROR_MESSAGE = "Transcription failed due to an internal error."
 
 
@@ -42,8 +31,6 @@ class JobError(BaseModel):
 
 
 class JobSummary(BaseModel):
-    """A job without its transcript: used in listings and as a base."""
-
     model_config = ConfigDict(use_enum_values=True)
 
     job_id: str
@@ -86,8 +73,6 @@ class JobSummary(BaseModel):
 
 
 class JobResponse(JobSummary):
-    """Full job status, including the transcript once ``status == completed``."""
-
     transcript: TranscriptOut | None = Field(
         default=None, description="Present only when the job has completed."
     )
@@ -122,8 +107,6 @@ class JobResponse(JobSummary):
 
 
 class JobCreatedResponse(BaseModel):
-    """Returned with ``202 Accepted`` as soon as the upload is stored and queued."""
-
     model_config = ConfigDict(use_enum_values=True)
 
     job_id: str
@@ -154,7 +137,5 @@ class HealthResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    """Body of every non-2xx response."""
-
     error_code: str = Field(description="Stable, machine-readable error code.")
     detail: str = Field(description="Human-readable explanation.")

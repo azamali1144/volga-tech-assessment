@@ -1,7 +1,3 @@
-"""HTTP-layer tests: the real app (routes, auth, rate limiting, error
-handlers, lifespan, background worker) driven through FastAPI's TestClient,
-with the mock engine. Requires requirements-dev.txt; skipped otherwise."""
-
 import tempfile
 import time
 import unittest
@@ -24,8 +20,6 @@ try:
 
     CLIENT_AVAILABLE = True
 except (ImportError, RuntimeError):
-    # Starlette's TestClient raises RuntimeError (not ImportError) when no
-    # HTTP client library is installed, i.e. requirements-dev.txt is missing.
     CLIENT_AVAILABLE = False
 
 KEY = "test-key"
@@ -57,13 +51,13 @@ class _ApiTestCase(unittest.TestCase):
             chunk_length_seconds=10,
             chunk_overlap_seconds=2,
             retry_backoff_base_seconds=0.01,
-            log_level="CRITICAL",  # keep test output quiet
+            log_level="CRITICAL",
         )
         options.update(self.settings_overrides)
         self.settings = Settings(**options)
         app = create_app(settings=self.settings, engine=self.engine_factory())
         self.client = TestClient(app, raise_server_exceptions=self.raise_server_exceptions)
-        self.client.__enter__()  # runs the lifespan: store, queue, workers
+        self.client.__enter__()
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
@@ -158,10 +152,10 @@ class UploadAndPollTest(_ApiTestCase):
         bogus = self.tmp / "voicemail.mp3"
         bogus.write_bytes(b"definitely not audio")
         body = self.assert_error(self.upload(bogus), 422, "invalid_audio")
-        self.assertIn("voicemail.mp3", body["detail"])        # caller's name...
-        self.assertNotIn(str(self.tmp), body["detail"])       # ...not server paths
+        self.assertIn("voicemail.mp3", body["detail"])
+        self.assertNotIn(str(self.tmp), body["detail"])
         self.assertEqual(self.services.store.list_jobs(caller_id_for(KEY)), [])
-        self.assertEqual(list(self.settings.audio_dir.iterdir()), [])  # nothing kept
+        self.assertEqual(list(self.settings.audio_dir.iterdir()), [])
 
     def test_other_callers_job_is_indistinguishable_from_missing(self):
         created = self.upload(make_tone_wav(self.tmp / "a.wav", seconds=1)).json()
@@ -184,7 +178,7 @@ class ListingTest(_ApiTestCase):
         listed = [j["job_id"] for page in (page1, page2, page3) for j in page["items"]]
         self.assertEqual(listed, ids[::-1])
         self.assertEqual((page1["next_offset"], page2["next_offset"], page3["next_offset"]), (2, 4, None))
-        self.assertNotIn("transcript", page1["items"][0])  # summaries only
+        self.assertNotIn("transcript", page1["items"][0])
 
         other = self.client.get(UPLOAD_URL, headers=OTHER_AUTH).json()
         self.assertEqual(len(other["items"]), 1)
@@ -211,14 +205,12 @@ class FailedJobTest(_ApiTestCase):
         self.assertIsNotNone(job["failed_at"])
         self.assertIsNone(job["transcript"])
         self.assertEqual(job["error"]["code"], "internal_error")
-        self.assertNotIn("/srv/secret", job["error"]["message"])  # generic message only
+        self.assertNotIn("/srv/secret", job["error"]["message"])
         dead_letters = list(self.settings.dead_letter_dir.glob("*.json"))
         self.assertEqual(len(dead_letters), 1)
 
 
 class RequestValidationTest(_ApiTestCase):
-    """Paths that are rejected before any audio processing (no ffmpeg needed)."""
-
     settings_overrides = {"max_upload_bytes": 10_000}
 
     def test_missing_or_wrong_api_key(self):
@@ -236,13 +228,11 @@ class RequestValidationTest(_ApiTestCase):
 
     def test_oversized_upload_rejected_from_content_length(self):
         big = self.tmp / "big.wav"
-        big.write_bytes(b"\0" * (10_000 + 100_000))  # beyond the multipart slack
+        big.write_bytes(b"\0" * (10_000 + 100_000))
         self.assert_error(self.upload(big), 413, "file_too_large")
         self.assertEqual(list(self.settings.audio_dir.iterdir()), [])
 
     def test_oversized_upload_within_slack_rejected_while_saving(self):
-        # Passes the Content-Length pre-check (limit + 64 KiB framing slack)
-        # but is caught by the streaming size cap while being stored.
         big = self.tmp / "big.wav"
         big.write_bytes(b"\0" * 30_000)
         self.assert_error(self.upload(big), 413, "file_too_large")
@@ -295,7 +285,6 @@ class RateLimitTest(_ApiTestCase):
         limited = self.client.get(UPLOAD_URL, headers=AUTH)
         self.assert_error(limited, 429, "rate_limited")
         self.assertGreaterEqual(int(limited.headers["Retry-After"]), 1)
-        # Another key has its own budget.
         self.assertEqual(self.client.get(UPLOAD_URL, headers=OTHER_AUTH).status_code, 200)
 
     def test_unauthenticated_requests_do_not_consume_a_keys_budget(self):
@@ -319,8 +308,6 @@ class UnexpectedErrorTest(_ApiTestCase):
 
 
 class StartupRecoveryTest(unittest.TestCase):
-    """Jobs left unfinished by a previous process are picked up on startup."""
-
     @unittest.skipUnless(CLIENT_AVAILABLE and FFMPEG_AVAILABLE, "needs httpx2 and ffmpeg")
     def test_interrupted_and_queued_jobs_are_finished_after_restart(self):
         from app.store import JobStore
@@ -332,8 +319,6 @@ class StartupRecoveryTest(unittest.TestCase):
                 storage_dir=tmp / "storage", api_keys=frozenset({KEY}), log_level="CRITICAL"
             )
             settings.ensure_dirs()
-            # Simulate a previous process that died: one job mid-processing,
-            # one still queued, both with audio already stored.
             store = JobStore(settings.db_path, transcript_dir=settings.transcript_dir)
             storage = LocalDiskStorage(settings.audio_dir)
             owner = caller_id_for(KEY)
@@ -354,7 +339,7 @@ class StartupRecoveryTest(unittest.TestCase):
                         break
                     time.sleep(0.02)
             self.assertEqual([j["status"] for j in jobs], ["completed", "completed"])
-            self.assertEqual(jobs[0]["retry_count"], 1)  # the interruption counted as an attempt
+            self.assertEqual(jobs[0]["retry_count"], 1)
             self.assertEqual(jobs[1]["retry_count"], 0)
 
 

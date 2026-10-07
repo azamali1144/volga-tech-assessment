@@ -22,7 +22,7 @@ class LoggingConfigTest(unittest.TestCase):
     def capture(self, fmt, emit, level="INFO"):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            configure_logging(level, fmt)  # handler binds to the redirected stdout
+            configure_logging(level, fmt)
             emit(logging.getLogger("app.test"))
         return buffer.getvalue().splitlines()
 

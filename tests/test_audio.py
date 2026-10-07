@@ -29,8 +29,6 @@ class _TempDirTestCase(unittest.TestCase):
 
 
 class PlanChunksTest(unittest.TestCase):
-    """Pure overlap/offset math; no audio files involved."""
-
     def test_windows_overlap_and_cover_full_duration(self):
         self.assertEqual(plan_chunks(25, 10, 2), [(0, 10), (8, 18), (16, 25)])
 
@@ -53,9 +51,9 @@ class PlanChunksTest(unittest.TestCase):
                     self.assertEqual(windows[0][0], 0)
                     self.assertEqual(windows[-1][1], duration)
                     for (s1, e1), (s2, e2) in zip(windows, windows[1:]):
-                        self.assertAlmostEqual(e1 - s2, overlap)  # exact overlap
-                        self.assertLess(s1, s2)                    # always advances
-                        self.assertLess(e1, duration)              # only last one reaches the end
+                        self.assertAlmostEqual(e1 - s2, overlap)
+                        self.assertLess(s1, s2)
+                        self.assertLess(e1, duration)
                     for s, e in windows:
                         self.assertLessEqual(e - s, length + 1e-9)
                         self.assertGreater(e - s, 0)
@@ -79,8 +77,6 @@ class SplitIntoChunksTest(_TempDirTestCase):
             self.assertAlmostEqual(duration, c.duration, places=6)
 
     def test_chunks_reconstruct_original_audio_exactly(self):
-        """Dropping each chunk's overlap and concatenating gives back the input,
-        sample for sample: nothing lost or duplicated at the seams."""
         wav = make_tone_wav(self.tmp / "in.wav", seconds=23.37)
         chunks = split_into_chunks(wav, self.tmp / "chunks", chunk_length=7, overlap=1.5)
 
@@ -167,7 +163,6 @@ class NormalizeToWavTest(_TempDirTestCase):
         self.assertFalse(out.exists())
 
     def test_normalized_output_feeds_chunker(self):
-        """The two halves of the module compose: normalize, then split."""
         src = make_tone_file(self.tmp / "long.mp3", seconds=12)
         wav = normalize_to_wav(src, self.tmp / "long.wav")
         chunks = split_into_chunks(wav, self.tmp / "chunks", chunk_length=5, overlap=1)

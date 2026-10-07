@@ -1,11 +1,3 @@
-"""Audio processing: duration probing, format normalization, and chunking.
-
-ffmpeg/ffprobe are invoked as subprocesses (argument lists, never a shell
-string), so user-supplied filenames can't inject shell commands. Any failure
-is raised as ``AudioProcessingError`` with a stable ``error_code`` that the
-API and worker can surface without leaking raw ffmpeg output to callers.
-"""
-
 from __future__ import annotations
 
 import json
@@ -16,14 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_SAMPLE_RATE = 16_000
-# Generous upper bounds so a wedged ffmpeg process can't hang a worker forever.
 PROBE_TIMEOUT_SECONDS = 30
 NORMALIZE_TIMEOUT_SECONDS = 30 * 60
 
 
 class AudioProcessingError(Exception):
-    """Raised when an input file can't be probed, decoded, or converted."""
-
     def __init__(self, error_code: str, message: str) -> None:
         super().__init__(message)
         self.error_code = error_code
@@ -52,7 +41,6 @@ def _run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
 
 
 def _last_stderr_line(stderr: str, *paths: Path) -> str:
-    """Last meaningful ffmpeg error line, with server-side paths redacted."""
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     line = lines[-1] if lines else "unknown error"
     for p in paths:
@@ -61,7 +49,6 @@ def _last_stderr_line(stderr: str, *paths: Path) -> str:
 
 
 def probe_duration_seconds(path: str | Path) -> float:
-    """Return the duration of an audio/video file in seconds, via ffprobe."""
     path = Path(path)
     if not path.is_file():
         raise AudioProcessingError("file_not_found", f"No such file: {path.name}")
@@ -100,12 +87,6 @@ def normalize_to_wav(
     dst: str | Path,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
 ) -> Path:
-    """Convert any ffmpeg-readable input to mono 16-bit PCM WAV at ``sample_rate``.
-
-    This is the single format boundary for the pipeline: everything after this
-    step (chunking, transcription) only ever sees one well-known format.
-    Video inputs (e.g. .mp4) are handled by dropping the video stream.
-    """
     src, dst = Path(src), Path(dst)
     if not src.is_file():
         raise AudioProcessingError("file_not_found", f"No such file: {src.name}")
@@ -120,16 +101,16 @@ def normalize_to_wav(
             "-loglevel", "error",
             "-y",
             "-i", str(src),
-            "-vn",                    # drop any video stream
-            "-ac", "1",               # mono
-            "-ar", str(sample_rate),  # resample
-            "-c:a", "pcm_s16le",      # 16-bit PCM
+            "-vn",
+            "-ac", "1",
+            "-ar", str(sample_rate),
+            "-c:a", "pcm_s16le",
             str(dst),
         ],
         timeout=NORMALIZE_TIMEOUT_SECONDS,
     )
     if result.returncode != 0 or not dst.is_file() or dst.stat().st_size == 0:
-        dst.unlink(missing_ok=True)  # don't leave a half-written file behind
+        dst.unlink(missing_ok=True)
         raise AudioProcessingError(
             "normalization_failed",
             f"Could not convert audio: {_last_stderr_line(result.stderr, src, dst)}",
@@ -137,13 +118,7 @@ def normalize_to_wav(
     return dst
 
 
-
 def wav_duration_seconds(path: str | Path) -> float:
-    """Duration of a PCM WAV from its header: exact and instant, no subprocess.
-
-    For files already normalized by ``normalize_to_wav``; anything else should
-    go through ``probe_duration_seconds``.
-    """
     path = Path(path)
     try:
         with wave.open(str(path), "rb") as w:
@@ -155,20 +130,9 @@ def wav_duration_seconds(path: str | Path) -> float:
             "invalid_audio", f"Not a readable WAV file: {path.name}"
         ) from exc
 
-# ---------------------------------------------------------------------------
-# Chunking
-# ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True)
 class AudioChunk:
-    """One slice of a longer recording.
-
-    ``start``/``end`` are positions in the *original* file, in seconds. The
-    merge step uses ``start`` to shift chunk-local timestamps back onto the
-    global timeline.
-    """
-
     index: int
     path: Path
     start: float
@@ -182,13 +146,6 @@ class AudioChunk:
 def plan_chunks(
     duration: float, chunk_length: float, overlap: float
 ) -> list[tuple[float, float]]:
-    """Compute ``(start, end)`` windows covering ``[0, duration]``.
-
-    Consecutive windows overlap by ``overlap`` seconds so a word spoken right
-    at a boundary is fully contained in at least one chunk. Windows advance by
-    ``chunk_length - overlap``; the last window is clamped to ``duration``.
-    Pure arithmetic, no I/O — this is what the overlap/offset tests target.
-    """
     if duration <= 0:
         raise ValueError("duration must be positive")
     if chunk_length <= 0:
@@ -200,8 +157,6 @@ def plan_chunks(
     windows: list[tuple[float, float]] = []
     i = 0
     while True:
-        # Multiply rather than accumulate, so float error doesn't drift
-        # across hundreds of chunks in a multi-hour file.
         start = i * step
         end = min(start + chunk_length, duration)
         windows.append((start, end))
@@ -216,13 +171,6 @@ def split_into_chunks(
     chunk_length: float,
     overlap: float,
 ) -> list[AudioChunk]:
-    """Split a normalized WAV into overlapping chunk files.
-
-    Expects the output of ``normalize_to_wav`` (PCM WAV). Slicing is done on
-    raw frames with the stdlib ``wave`` module instead of spawning ffmpeg per
-    chunk: it's sample-exact (chunk offsets are exactly what the merge step
-    assumes), needs no re-encoding, and costs one pass over the file.
-    """
     wav_path, out_dir = Path(wav_path), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -247,8 +195,6 @@ def split_into_chunks(
         chunks: list[AudioChunk] = []
         windows = plan_chunks(total_frames / rate, chunk_length, overlap)
         for index, (start_s, end_s) in enumerate(windows):
-            # Snap to whole frames; report the snapped times so offsets used by
-            # the merge step match the audio actually in each chunk file.
             start_f = round(start_s * rate)
             end_f = min(round(end_s * rate), total_frames)
             src.setpos(start_f)

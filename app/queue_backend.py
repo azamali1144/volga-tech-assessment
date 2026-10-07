@@ -1,15 +1,3 @@
-"""Job queue abstraction (Adapter pattern).
-
-The API enqueues job ids; workers dequeue them. Only ids travel through the
-queue: the job's state lives in the database, so a message is tiny and a
-redelivered or duplicate message is harmless (the store's status
-compare-and-set rejects a second claim).
-
-``InMemoryQueue`` wraps ``asyncio.Queue`` for this single-process demo. A
-production ``SQSQueue``/``RabbitMQQueue`` would implement the same methods;
-delayed delivery maps to SQS ``DelaySeconds`` or a RabbitMQ delayed exchange.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -23,38 +11,21 @@ class QueueClosedError(RuntimeError):
 @runtime_checkable
 class JobQueue(Protocol):
     async def enqueue(self, job_id: str) -> None:
-        """Make ``job_id`` available to workers now."""
         ...
 
     async def enqueue_after(self, job_id: str, delay_seconds: float) -> None:
-        """Make ``job_id`` available after ``delay_seconds``, without blocking
-        the caller (used for retry backoff)."""
         ...
 
     async def dequeue(self, timeout: float | None = None) -> str | None:
-        """Wait for the next job id; ``None`` if ``timeout`` elapses first.
-
-        The timeout lets a worker loop wake up periodically (e.g. to notice
-        shutdown) instead of blocking forever.
-        """
         ...
 
     def size(self) -> int:
-        """Messages ready now (excludes delayed ones). For metrics/health."""
         ...
 
 
 class InMemoryQueue:
-    """In-process queue: fast and zero-setup, but not durable.
-
-    Anything still queued (or waiting out a retry delay) is lost if the
-    process stops — the main reason production uses SQS/RabbitMQ instead.
-    """
-
     def __init__(self) -> None:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
-        # Strong references to pending delayed-delivery tasks: asyncio only
-        # keeps weak references, so an unreferenced task can be GC'd mid-sleep.
         self._delayed: set[asyncio.Task[None]] = set()
         self._closed = False
 
@@ -98,7 +69,6 @@ class InMemoryQueue:
         return len(self._delayed)
 
     async def close(self) -> None:
-        """Stop accepting work and cancel pending delayed deliveries."""
         self._closed = True
         for task in list(self._delayed):
             task.cancel()

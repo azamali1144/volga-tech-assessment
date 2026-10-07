@@ -37,15 +37,15 @@ class InMemoryQueueTest(unittest.IsolatedAsyncioTestCase):
     async def test_enqueue_after_delays_delivery_without_blocking_caller(self):
         started = time.perf_counter()
         await self.queue.enqueue_after("later", 0.1)
-        self.assertLess(time.perf_counter() - started, 0.05)  # caller not blocked
+        self.assertLess(time.perf_counter() - started, 0.05)
         self.assertEqual((self.queue.size(), self.queue.delayed_count), (0, 1))
 
         await self.queue.enqueue("now")
-        self.assertEqual(await self.queue.dequeue(timeout=1), "now")  # jumps ahead
+        self.assertEqual(await self.queue.dequeue(timeout=1), "now")
         self.assertEqual(await self.queue.dequeue(timeout=1), "later")
         self.assertGreaterEqual(time.perf_counter() - started, 0.09)
-        await asyncio.sleep(0.01)  # done-callbacks run on the next loop step
-        self.assertEqual(self.queue.delayed_count, 0)  # finished tasks released
+        await asyncio.sleep(0.01)
+        self.assertEqual(self.queue.delayed_count, 0)
 
     async def test_zero_delay_enqueues_immediately(self):
         await self.queue.enqueue_after("x", 0)

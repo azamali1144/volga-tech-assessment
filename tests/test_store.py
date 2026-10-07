@@ -90,8 +90,8 @@ class StatusLifecycleTest(_StoreTestCase):
         self.store.mark_processing(job.id)
         done = self.store.mark_completed(job.id, language="en", duration_seconds=42.0)
         self.assertEqual(done.status, JobStatus.COMPLETED)
-        self.assertEqual(done.retry_count, 2)             # history kept
-        self.assertIsNone(done.error_code)                 # stale error cleared
+        self.assertEqual(done.retry_count, 2)
+        self.assertIsNone(done.error_code)
         self.assertIsNone(done.error_message)
         self.assertIsNone(done.failed_at)
         self.assertEqual((done.language, done.duration_seconds), ("en", 42.0))
@@ -136,10 +136,10 @@ class StatusLifecycleTest(_StoreTestCase):
     def test_illegal_shortcuts_rejected(self):
         job = self.new_job()
         with self.assertRaises(InvalidTransitionError) as ctx:
-            self.store.mark_completed(job.id)  # queued -> completed
+            self.store.mark_completed(job.id)
         self.assertEqual(ctx.exception.current, JobStatus.QUEUED)
         with self.assertRaises(InvalidTransitionError):
-            self.store.mark_retrying(job.id, "x", "y")  # queued -> retrying
+            self.store.mark_retrying(job.id, "x", "y")
         self.assertEqual(self.store.get_job(job.id).status, JobStatus.QUEUED)
 
     def test_rejected_transition_changes_nothing(self):
@@ -219,7 +219,7 @@ class TranscriptPersistenceTest(_StoreTestCase):
         self.assertEqual(self.store.save_transcript(job.id, self.small), 1)
         self.assertEqual(self.store.save_transcript(job.id, self.large), 2)
         self.assertEqual(self.store.get_job(job.id).trans_version, 2)
-        self.assertEqual(self.store.get_transcript(job.id), self.large)      # latest
+        self.assertEqual(self.store.get_transcript(job.id), self.large)
         self.assertEqual(self.store.get_transcript(job.id, version=1), self.small)
         self.assertIsNone(self.store.get_transcript(job.id, version=3))
 
@@ -237,7 +237,6 @@ class TranscriptPersistenceTest(_StoreTestCase):
     def test_failed_save_leaves_no_orphan_file_and_version_unchanged(self):
         job = self.new_job()
         self.store.save_transcript(job.id, self.small)
-        # Occupy version 2 behind the store's back so the next insert clashes.
         with self.store._conn:
             self.store._conn.execute(
                 "INSERT INTO transcripts (job_id, version, content, char_count, created_at) "
@@ -251,14 +250,14 @@ class TranscriptPersistenceTest(_StoreTestCase):
 
     def test_schema_rejects_inconsistent_rows(self):
         job = self.new_job()
-        with self.assertRaises(sqlite3.IntegrityError):  # both inline and file
+        with self.assertRaises(sqlite3.IntegrityError):
             with self.store._conn:
                 self.store._conn.execute(
                     "INSERT INTO transcripts (job_id, version, content, content_path, "
                     "char_count, created_at) VALUES (?, 1, '{}', 'x.json', 2, 'now')",
                     (job.id,),
                 )
-        with self.assertRaises(sqlite3.IntegrityError):  # no such job
+        with self.assertRaises(sqlite3.IntegrityError):
             with self.store._conn:
                 self.store._conn.execute(
                     "INSERT INTO transcripts (job_id, version, content, char_count, "

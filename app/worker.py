@@ -1,10 +1,3 @@
-"""Background processing: the transcription pipeline and the worker loop.
-
-``TranscriptionPipeline`` is the pure core: audio file in, transcript out. It
-knows nothing about queues, databases or HTTP, so it can be tested (and
-reused, e.g. from a CLI or a batch job) on its own.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -31,13 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 class TranscriptionPipeline:
-    """normalize -> (single pass | chunk -> transcribe chunks -> merge).
-
-    All blocking work (ffmpeg, WAV slicing, the engine) runs in worker
-    threads via ``asyncio.to_thread``, so the event loop — which also serves
-    the API in this single-process demo — stays responsive.
-    """
-
     def __init__(
         self,
         engine: TranscriptionEngine,
@@ -74,15 +60,8 @@ class TranscriptionPipeline:
         )
 
     async def run(self, audio_path: str | Path) -> TranscriptionResult:
-        """Transcribe ``audio_path`` (any ffmpeg-readable format).
-
-        Intermediate files (normalized WAV, chunks) live in a private temp
-        directory that is removed when this returns — on success or failure.
-        """
         if self.work_dir is not None:
             self.work_dir.mkdir(parents=True, exist_ok=True)
-        # ignore_cleanup_errors: on Windows a file still held open elsewhere
-        # can't be deleted; failing the job over temp cleanup would be wrong.
         with tempfile.TemporaryDirectory(
             prefix="transcribe-", dir=self.work_dir, ignore_cleanup_errors=True
         ) as tmp:
@@ -97,7 +76,6 @@ class TranscriptionPipeline:
             else:
                 result = await self._transcribe_chunked(wav, tmp_dir / "chunks")
 
-        # The WAV header is the authoritative duration; engines may omit it.
         return dataclasses.replace(result, duration=round(duration, TIMESTAMP_PRECISION))
 
     async def _transcribe_chunked(self, wav: Path, chunk_dir: Path) -> TranscriptionResult:
@@ -113,8 +91,6 @@ class TranscriptionPipeline:
 
         async def transcribe_chunk(chunk_path: Path) -> TranscriptionResult | None:
             async with semaphore:
-                # Once any chunk has failed the whole job will be retried, so
-                # don't start more (possibly minutes-long) chunk transcriptions.
                 if failed.is_set():
                     return None
                 try:
@@ -123,9 +99,6 @@ class TranscriptionPipeline:
                     failed.set()
                     raise
 
-        # return_exceptions=True: wait for every in-flight chunk to finish
-        # before returning. A thread started by to_thread can't be cancelled,
-        # so returning early would delete the temp dir under a running engine.
         outcomes = await asyncio.gather(
             *(transcribe_chunk(c.path) for c in chunks), return_exceptions=True
         )
@@ -136,14 +109,6 @@ class TranscriptionPipeline:
 
 
 class Worker:
-    """Consumer side of the queue: claim a job, run the pipeline, persist.
-
-    Several ``Worker`` instances can share one queue and store (several
-    asyncio tasks here, or separate processes with a durable queue): the
-    store's compare-and-set on ``queued -> processing`` means a job id
-    delivered twice is only ever processed once.
-    """
-
     def __init__(
         self,
         store: JobStore,
@@ -171,11 +136,9 @@ class Worker:
         self._stopping = asyncio.Event()
 
     def backoff_seconds(self, retry_number: int) -> float:
-        """Delay before retry ``retry_number`` (1-based): base * 2^(n-1)."""
         return self.retry_backoff_base_seconds * 2 ** (retry_number - 1)
 
     def stop(self) -> None:
-        """Ask ``run_forever`` to exit after the current job (graceful)."""
         self._stopping.set()
 
     async def run_forever(self) -> None:
@@ -183,13 +146,10 @@ class Worker:
         while not self._stopping.is_set():
             job_id = await self._next_job()
             if job_id is None:
-                continue  # idle or stopping; loop round to re-check
+                continue
             try:
                 await self._process_once(job_id)
             except Exception:
-                # _process_once handles job failures itself; anything reaching
-                # here is a bug or an infrastructure fault (e.g. the database
-                # is down). Log it and keep the worker alive for other jobs.
                 logger.exception(
                     "unexpected error processing job",
                     extra={"worker": self.name, "job_id": job_id},
@@ -197,14 +157,6 @@ class Worker:
         logger.info("worker stopped", extra={"worker": self.name})
 
     async def _next_job(self) -> str | None:
-        """Wait for a job id, but return ``None`` as soon as ``stop()`` is called.
-
-        Without this, an idle worker would only notice shutdown when its
-        dequeue timeout expired, delaying every graceful stop by up to
-        ``poll_timeout_seconds``. Cancelling a pending ``dequeue`` loses
-        nothing: an item is only removed from the queue once the get
-        completes.
-        """
         dequeue = asyncio.ensure_future(self.queue.dequeue(timeout=self.poll_timeout_seconds))
         stopping = asyncio.ensure_future(self._stopping.wait())
         try:
@@ -224,8 +176,6 @@ class Worker:
         try:
             job = self.store.mark_processing(job_id)
         except (JobNotFoundError, InvalidTransitionError) as exc:
-            # Duplicate delivery, or a message for a job that already finished
-            # or no longer exists: nothing to do.
             logger.warning(
                 "skipping job that can't be claimed",
                 extra={"worker": self.name, "job_id": job_id, "reason": str(exc)},
@@ -259,12 +209,6 @@ class Worker:
         )
 
     async def _handle_failure(self, job: Job, exc: Exception) -> None:
-        """Retry transient failures with exponential backoff; dead-letter the rest.
-
-        ``job`` is the row as claimed for this attempt, so ``job.retry_count``
-        is the number of retries already used. A job gets at most
-        ``1 + max_retries`` attempts in total.
-        """
         code, message = describe_error(exc)
         attempt = job.retry_count + 1
         retryable = is_retryable(code)
@@ -272,8 +216,6 @@ class Worker:
         if retryable and job.retry_count < self.max_retries:
             retrying = self.store.mark_retrying(job.id, code, message)
             delay = self.backoff_seconds(retrying.retry_count)
-            # Delayed re-enqueue: the worker moves straight on to other jobs
-            # instead of sleeping through the backoff.
             await self.queue.enqueue_after(job.id, delay)
             logger.warning(
                 "job attempt failed; retry scheduled",
@@ -310,13 +252,6 @@ class Worker:
 def write_dead_letter(
     dead_letter_dir: str | Path, job: Job, *, attempts: int, reason: str, source: str
 ) -> None:
-    """Record a permanently failed job for manual review.
-
-    The database row (status=failed) is the source of truth; this file is the
-    review queue — in production, a real dead-letter queue (SQS DLQ). A
-    failure to write it is logged but never raised: the job is already
-    correctly marked failed.
-    """
     record = {
         "job_id": job.id,
         "user_id": job.user_id,
@@ -340,9 +275,6 @@ def write_dead_letter(
         logger.exception("could not write dead-letter record", extra={"job_id": job.id})
 
 
-# Failures that another attempt can't fix: the input itself is bad or gone,
-# or the deployment can't transcribe at all. Everything else (engine crashes,
-# timeouts, I/O hiccups, unexpected exceptions) is treated as transient.
 NON_RETRYABLE_ERROR_CODES = frozenset(
     {
         "invalid_audio",
@@ -362,12 +294,6 @@ def is_retryable(error_code: str) -> bool:
 
 
 def describe_error(exc: BaseException) -> tuple[str, str]:
-    """Map an exception to a stable ``(error_code, message)`` for the job row.
-
-    Domain errors (``AudioProcessingError``) carry their own code; anything
-    else is recorded as ``internal_error`` with its type, so raw exception
-    text from third-party libraries never becomes the whole public message.
-    """
     code = getattr(exc, "error_code", None)
     if isinstance(code, str) and code:
         return code, str(exc)

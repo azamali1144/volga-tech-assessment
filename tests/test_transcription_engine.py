@@ -134,8 +134,6 @@ class _FakeWhisperModel:
 
 
 class WhisperEngineTest(_TempDirTestCase):
-    """Runs against fake ``whisper``/``torch`` modules: no model download."""
-
     def setUp(self):
         super().setUp()
         self.model = _FakeWhisperModel()
@@ -160,7 +158,7 @@ class WhisperEngineTest(_TempDirTestCase):
             _spans(result),
             [(0.0, 1.23, "Hello world."), (2.0, 4.0, "How are you?")],
         )
-        self.assertEqual([s.id for s in result.segments], [0, 1])  # blank dropped, renumbered
+        self.assertEqual([s.id for s in result.segments], [0, 1])
         self.assertEqual(result.text, "Hello world. How are you?")
         self.assertEqual(result.language, "en")
         self.assertEqual(result.duration, 4.2)
@@ -189,21 +187,17 @@ class WhisperEngineTest(_TempDirTestCase):
             [(w.start, w.end, w.text) for w in first.words],
             [(0.0, 0.5, " Hello"), (0.6, 1.23, " world.")],
         )
-        # Blank words are dropped; the rest keep their timings and spacing.
         self.assertEqual([w.text for w in second.words], [" How", " are", " you?"])
 
 
 class WhisperEngineMissingDependencyTest(unittest.TestCase):
     def test_missing_package_raises_engine_unavailable(self):
-        # A None entry in sys.modules makes the import raise ImportError. Both
-        # are stubbed so the test doesn't depend on what's really installed.
         with mock.patch.dict(sys.modules, {"torch": None, "whisper": None}):
             with self.assertRaises(EngineUnavailableError) as ctx:
                 WhisperEngine().transcribe(Path("unused.wav"))
         self.assertIn("requirements-whisper.txt", str(ctx.exception))
 
     def test_installed_but_unloadable_torch_raises_engine_unavailable(self):
-        # e.g. Windows Smart App Control blocking torch's native DLLs.
         real_import = __import__
 
         def blocked_import(name, *args, **kwargs):
@@ -216,14 +210,11 @@ class WhisperEngineMissingDependencyTest(unittest.TestCase):
                 with self.assertRaises(EngineUnavailableError) as ctx:
                     WhisperEngine().transcribe(Path("unused.wav"))
         self.assertEqual(ctx.exception.error_code, "engine_unavailable")
-        self.assertNotIn("secret", str(ctx.exception))  # no local paths to callers
-        self.assertIn("shm.dll", "\n".join(logs.output))  # full cause in the log
+        self.assertNotIn("secret", str(ctx.exception))
+        self.assertIn("shm.dll", "\n".join(logs.output))
 
 
 class MergeSeamCasesTest(unittest.TestCase):
-    """Hand-built seam scenarios. Chunk 0 = [0, 10], chunk 1 = [8, 18]:
-    the overlap is [8, 10] and the cut sits at its midpoint, 9.0."""
-
     chunks = [_chunk(0, 0, 10), _chunk(1, 8, 18)]
 
     def merge(self, first, second):
@@ -236,21 +227,21 @@ class MergeSeamCasesTest(unittest.TestCase):
     def test_word_centered_exactly_on_cut_is_kept_once_by_later_chunk(self):
         merged = self.merge(
             _result((8.5, 9.5, "boundary-first")),
-            _result((0.5, 1.5, "boundary-second")),  # 8.5-9.5 globally
+            _result((0.5, 1.5, "boundary-second")),
         )
         self.assertEqual(_spans(merged), [(8.5, 9.5, "boundary-second")])
 
     def test_phrase_straddling_cut_kept_once_by_chunk_holding_most_of_it(self):
         merged = self.merge(
             _result((7.0, 9.6, "hello there")),
-            _result((0.2, 1.6, "there")),  # 8.2-9.6: tail of the same phrase
+            _result((0.2, 1.6, "there")),
         )
         self.assertEqual(_spans(merged), [(7.0, 9.6, "hello there")])
 
     def test_word_clipped_at_chunk_edge_replaced_by_complete_version(self):
         merged = self.merge(
-            _result((9.3, 10.0, "extraord")),       # cut off by chunk 0's edge
-            _result((1.3, 2.4, "extraordinary")),   # 9.3-10.4, heard in full
+            _result((9.3, 10.0, "extraord")),
+            _result((1.3, 2.4, "extraordinary")),
         )
         self.assertEqual(_spans(merged), [(9.3, 10.4, "extraordinary")])
 
@@ -265,7 +256,7 @@ class MergeSeamCasesTest(unittest.TestCase):
     def test_overlapping_kept_segment_is_clamped_not_backwards(self):
         merged = self.merge(
             _result((7.0, 8.9, "a")),
-            _result((0.6, 2.0, "b")),  # 8.6-10.0, center 9.3 >= cut
+            _result((0.6, 2.0, "b")),
         )
         self.assertEqual(_spans(merged), [(7.0, 8.9, "a"), (8.9, 10.0, "b")])
 
@@ -288,7 +279,6 @@ class MergeSeamCasesTest(unittest.TestCase):
 
 
 def _wseg(seg_id, *words):
-    """Segment from (start, end, text) words, Whisper-style leading spaces."""
     ws = tuple(Word(start, end, text) for start, end, text in words)
     return Segment(seg_id, ws[0].start, ws[-1].end, "".join(w.text for w in ws).strip(), words=ws)
 
@@ -306,17 +296,12 @@ def _all_words(result):
 
 
 class WordLevelMergeTest(unittest.TestCase):
-    """Chunk 0 = [0, 20], chunk 1 = [15, 35]: overlap [15, 20], cut at 17.5.
-    Chunk 1's word times below are chunk-local (global = local + 15)."""
-
     chunks = [_chunk(0, 0, 20), _chunk(1, 15, 35)]
 
     def merge(self, first, second):
         return merge_chunk_results(self.chunks, [first, second])
 
     def test_word_clipped_at_chunk_edge_is_replaced_and_nothing_is_lost(self):
-        # Real case: chunk 0 heard "quarter" cut off at its edge as "court.",
-        # and a segment-level merge also lost "driven mostly by".
         first = _wresult(_wseg(
             0,
             (16.0, 16.4, " Revenue"), (16.5, 16.9, " grew"), (17.0, 17.3, " by"),
@@ -335,8 +320,6 @@ class WordLevelMergeTest(unittest.TestCase):
         self.assertNotIn("court", " ".join(_texts(merged)))
 
     def test_nothing_is_repeated_when_chunks_segment_differently(self):
-        # Real case: the segment merge produced "take-home / assessment. /
-        # home assessment."
         first = _wresult(_wseg(
             0, (16.2, 16.8, " a"), (16.9, 17.3, " short"), (17.4, 18.2, " take-home"),
             (18.3, 19.4, " assessment."),
@@ -369,10 +352,6 @@ class WordLevelMergeTest(unittest.TestCase):
         self.assertEqual(_texts(self.merge(first, second)), ["grew by 12% growth."])
 
     def test_seam_word_with_shifted_timing_is_not_duplicated(self):
-        # Chunk 0 keeps "assessment." (17.0-17.9, center 17.45 < cut 17.5).
-        # Chunk 1 times the same word 0.5s later (17.5-18.4): its center 17.95
-        # is past everything kept so far, so the center rule alone would keep
-        # it twice. Same text + overlapping in time = the same word.
         first = _wresult(_wseg(0, (16.4, 16.9, " the"), (17.0, 17.9, " assessment.")))
         second = _wresult(_wseg(0, (1.4, 1.9, " the"), (2.5, 3.4, " assessment."), (3.6, 4.2, " Finally,")))
         self.assertEqual(_all_words(self.merge(first, second)), ["the", "assessment.", "Finally,"])
@@ -397,9 +376,6 @@ class WordLevelMergeTest(unittest.TestCase):
 
 
 class MergeWithRealChunksTest(_TempDirTestCase):
-    """Split real WAVs, transcribe each chunk with MockEngine, merge, and
-    compare against transcribing the whole file in one pass."""
-
     engine = MockEngine(segment_seconds=2.0)
 
     def chunk_and_merge(self, seconds, length, overlap, engine=None):
@@ -420,8 +396,6 @@ class MergeWithRealChunksTest(_TempDirTestCase):
             self.assertLess(s.start, s.end)
 
     def test_merge_chunk_results_dedupes_overlap_and_spans_full_duration(self):
-        """When chunk boundaries line up with the segmentation, chunked +
-        merged must equal a single pass: no gaps, no duplicates, full span."""
         for seconds, length, overlap in ((25, 10, 2), (123.45, 30, 6), (600, 240, 4)):
             with self.subTest(seconds=seconds, length=length, overlap=overlap):
                 wav, chunks, merged = self.chunk_and_merge(seconds, length, overlap)
@@ -437,9 +411,6 @@ class MergeWithRealChunksTest(_TempDirTestCase):
     MISALIGNED = ((660, 240, 5), (61, 20, 3), (100, 7, 2.5))
 
     def test_misaligned_seams_lose_nothing_with_word_timings(self):
-        """Chunk offsets off the mock's 2s grid make the chunks segment each
-        seam differently. Merging by words, the timeline is still covered
-        with no gap longer than half a word (the mock's words are ~0.67s)."""
         half_word = self.engine.segment_seconds / 3 / 2
         for seconds, length, overlap in self.MISALIGNED:
             with self.subTest(seconds=seconds, length=length, overlap=overlap):
@@ -451,8 +422,6 @@ class MergeWithRealChunksTest(_TempDirTestCase):
                     self.assertLessEqual(b.start - a.end, half_word + 0.01, "gap too large")
 
     def test_segment_fallback_error_is_bounded_by_half_a_segment(self):
-        """Without word timings the merge works on whole segments; the
-        documented worst case at a misaligned seam is half a segment."""
         engine = MockEngine(segment_seconds=2.0, word_timestamps=False)
         half_segment = engine.segment_seconds / 2
         for seconds, length, overlap in self.MISALIGNED:

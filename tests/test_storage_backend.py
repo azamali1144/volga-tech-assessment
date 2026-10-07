@@ -26,7 +26,7 @@ class LocalDiskStorageTest(unittest.TestCase):
         self.assertIsInstance(self.storage, ObjectStorage)
 
     def test_save_open_round_trip(self):
-        data = os.urandom(3 * 1024 * 1024 + 7)  # spans several copy buffers
+        data = os.urandom(3 * 1024 * 1024 + 7)
         written = self.storage.save("audio/job1.mp3", io.BytesIO(data))
         self.assertEqual(written, len(data))
         self.assertTrue(self.storage.exists("audio/job1.mp3"))
@@ -51,7 +51,7 @@ class LocalDiskStorageTest(unittest.TestCase):
             self.storage.save("audio/big.mp3", io.BytesIO(b"x" * 2001), max_bytes=2000)
         self.assertEqual(ctx.exception.max_bytes, 2000)
         self.assertFalse(self.storage.exists("audio/big.mp3"))
-        self.assertEqual(os.listdir(self.root / "audio"), [])  # no .part files
+        self.assertEqual(os.listdir(self.root / "audio"), [])
 
     def test_size_cap_allows_exact_limit(self):
         self.assertEqual(
@@ -77,7 +77,6 @@ class LocalDiskStorageTest(unittest.TestCase):
                     self.storage.save(key, io.BytesIO(b"x"))
                 with self.assertRaises(InvalidKeyError):
                     self.storage.exists(key)
-        # Nothing was written anywhere outside the storage root.
         outside = [p for p in Path(self._tmp.name).rglob("*") if not p.is_relative_to(self.root)]
         self.assertEqual(outside, [])
 

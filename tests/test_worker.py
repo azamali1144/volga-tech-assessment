@@ -24,9 +24,6 @@ SETTLE_TIMEOUT = 10.0
 
 
 class RecordingEngine(MockEngine):
-    """MockEngine that records calls and concurrency, and can be told to fail
-    its first ``fail_times`` calls (or the calls numbered in ``fail_on``)."""
-
     def __init__(self, fail_times=0, exc=None, delay=0.0, fail_on=()):
         super().__init__(segment_seconds=2.0)
         self.fail_times = fail_times
@@ -95,10 +92,8 @@ class TranscriptionPipelineTest(_TempDirCase):
 
     async def test_long_audio_is_chunked_and_merged_like_a_single_pass(self):
         engine = RecordingEngine()
-        # 10s chunks with 2s overlap advance by 8s: chunk offsets land on the
-        # mock's 2s segment grid, so the merge must reproduce a single pass.
         result = await self.pipeline(engine).run(self.tone(seconds=65))
-        self.assertEqual(engine.calls, 8)  # windows start at 0, 8, ..., 56
+        self.assertEqual(engine.calls, 8)
 
         single = await self.pipeline(RecordingEngine(), chunk_threshold_seconds=1000).run(
             self.tone("again.wav", seconds=65)
@@ -120,7 +115,7 @@ class TranscriptionPipelineTest(_TempDirCase):
         engine = RecordingEngine(fail_on={2}, exc=RuntimeError("chunk 2 failed"))
         with self.assertRaisesRegex(RuntimeError, "chunk 2 failed"):
             await self.pipeline(engine, max_concurrent_chunks=1).run(self.tone(seconds=65))
-        self.assertEqual(engine.calls, 2)  # chunks 3-8 never started
+        self.assertEqual(engine.calls, 2)
         self.assert_work_dir_empty()
 
     async def test_invalid_input_raises_audio_error_and_cleans_up(self):
@@ -233,12 +228,12 @@ class WorkerTest(_TempDirCase):
         self.assertEqual(done.status, JobStatus.COMPLETED)
         self.assertEqual(done.retry_count, 2)
         self.assertEqual(engine.calls, 3)
-        self.assertIsNone(done.error_code)  # stale error from attempt 2 cleared
+        self.assertIsNone(done.error_code)
         self.assertIsNotNone(self.store.get_transcript(job.id))
         self.assertEqual(self.dead_letters(), [])
 
     async def test_permanent_failure_goes_to_dead_letter(self):
-        engine = RecordingEngine(fail_times=10**6)  # never succeeds
+        engine = RecordingEngine(fail_times=10**6)
         self.start_worker(engine, max_retries=3)
         job = self.submit()
         await self.queue.enqueue(job.id)
@@ -247,13 +242,13 @@ class WorkerTest(_TempDirCase):
         failed = self.store.get_job(job.id)
         self.assertEqual(failed.status, JobStatus.FAILED)
         self.assertEqual(failed.retry_count, 3)
-        self.assertEqual(engine.calls, 4)  # 1 attempt + 3 retries
+        self.assertEqual(engine.calls, 4)
         self.assertEqual(failed.error_code, "internal_error")
         self.assertIn("transient engine failure", failed.error_message)
         self.assertIsNotNone(failed.failed_at)
         self.assertIsNone(self.store.get_transcript(job.id))
 
-        (record,) = self.dead_letters()  # exactly one
+        (record,) = self.dead_letters()
         self.assertEqual(record["job_id"], job.id)
         self.assertEqual(record["attempts"], 4)
         self.assertEqual(record["reason"], "retries_exhausted")
@@ -287,7 +282,7 @@ class WorkerTest(_TempDirCase):
 
     async def test_missing_audio_object_fails_permanently(self):
         self.start_worker(RecordingEngine())
-        job = self.store.create_job("alice", "gone.wav", "audio/gone.wav")  # never uploaded
+        job = self.store.create_job("alice", "gone.wav", "audio/gone.wav")
         await self.queue.enqueue(job.id)
         await self.wait_until_settled(job.id)
         failed = self.store.get_job(job.id)
@@ -329,7 +324,7 @@ class WorkerTest(_TempDirCase):
         for _ in range(3):
             await self.queue.enqueue(job.id)
         await self.wait_until_settled(job.id)
-        await asyncio.sleep(0.1)  # let the duplicate messages be consumed
+        await asyncio.sleep(0.1)
         self.assertEqual(engine.calls, 1)
         self.assertEqual(self.store.get_job(job.id).trans_version, 1)
 
@@ -359,13 +354,11 @@ class WorkerTest(_TempDirCase):
             await self.queue.enqueue(second.id)
             await self.wait_until_settled(second.id)
         self.assertIn("unexpected error processing job", logs.output[0])
-        self.assertFalse(self.tasks[0].done())  # worker still running
+        self.assertFalse(self.tasks[0].done())
         self.assertEqual(self.store.get_job(second.id).status, JobStatus.COMPLETED)
         self.assertEqual(self.store.get_job(first.id).status, JobStatus.QUEUED)
 
     async def test_stop_exits_promptly_when_idle(self):
-        # A long poll timeout proves stop() wakes the idle worker rather than
-        # the worker noticing only when its dequeue times out.
         worker = self.start_worker(RecordingEngine(), poll_timeout_seconds=10)
         await asyncio.sleep(0.05)
         started = time.monotonic()
@@ -379,7 +372,7 @@ class WorkerTest(_TempDirCase):
         worker.stop()
         await asyncio.wait_for(self.tasks[0], 1)
         await self.queue.enqueue("arrives-after-stop")
-        self.assertEqual(self.queue.size(), 1)  # the cancelled dequeue took nothing
+        self.assertEqual(self.queue.size(), 1)
 
     async def test_multiple_workers_drain_many_jobs(self):
         engine = RecordingEngine(delay=0.02)

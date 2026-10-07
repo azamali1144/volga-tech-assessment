@@ -1,10 +1,3 @@
-"""Centralized, environment-driven configuration.
-
-Every tunable lives here so the rest of the app never reads ``os.environ``
-directly. Defaults are safe for local development; production overrides them
-with environment variables (see ``.env.example``).
-"""
-
 from __future__ import annotations
 
 import os
@@ -48,50 +41,39 @@ def _env_csv(name: str, default: str) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class Settings:
-    # --- API / security ---
     api_keys: frozenset[str] = frozenset({"dev-local-key"})
     rate_limit_requests: int = 60
     rate_limit_window_seconds: float = 60.0
 
-    # --- Upload validation ---
-    max_upload_bytes: int = 200 * 1024 * 1024  # 200 MB
+    max_upload_bytes: int = 200 * 1024 * 1024
     allowed_extensions: frozenset[str] = frozenset(
         {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".mp4"}
     )
 
-    # --- Audio processing / chunking ---
     sample_rate: int = 16_000
-    chunk_threshold_seconds: float = 300.0  # files longer than this get chunked
+    chunk_threshold_seconds: float = 300.0
     chunk_length_seconds: float = 240.0
     chunk_overlap_seconds: float = 5.0
     max_concurrent_chunk_transcriptions: int = 2
 
-    # --- Transcription engine ---
-    transcription_engine: str = "mock"  # "mock" | "whisper"
+    transcription_engine: str = "mock"
     whisper_model: str = "base"
 
-    # --- Worker / retries ---
     max_retries: int = 3
     retry_backoff_base_seconds: float = 2.0
-    # Worker tasks in this process. Whisper runs one transcription at a time
-    # per model, so for real throughput scale worker *processes* instead.
     worker_count: int = 1
 
-    # --- Logging ---
     log_level: str = "INFO"
-    log_format: str = "json"  # "json" | "text"
+    log_format: str = "json"
 
-    # --- Persistence ---
     storage_dir: Path = Path("storage")
     inline_transcript_max_chars: int = 20_000
-    # Sub-paths default to locations under storage_dir (filled in __post_init__).
     audio_dir: Path | None = None
     transcript_dir: Path | None = None
     dead_letter_dir: Path | None = None
     db_path: Path | None = None
 
     def __post_init__(self) -> None:
-        # Frozen dataclass, so derived defaults are set via object.__setattr__.
         derived = {
             "audio_dir": self.storage_dir / "audio",
             "transcript_dir": self.storage_dir / "transcripts",
@@ -134,7 +116,6 @@ class Settings:
             raise ValueError("MAX_RETRIES must be >= 0")
 
     def ensure_dirs(self) -> None:
-        """Create runtime directories. Called at app/worker startup, not import."""
         for path in (
             self.storage_dir,
             self.audio_dir,
@@ -146,7 +127,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        d = cls()  # defaults, used as fallbacks below
+        d = cls()
         storage_dir = Path(_env_str("STORAGE_DIR", str(d.storage_dir)))
 
         def _env_path(name: str) -> Path | None:
@@ -201,10 +182,4 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Process-wide settings, read from the environment once.
-
-    Tests should build ``Settings(...)`` directly (or call
-    ``get_settings.cache_clear()`` after changing env vars) rather than
-    mutating global state.
-    """
     return Settings.from_env()

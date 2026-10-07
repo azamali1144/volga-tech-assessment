@@ -33,11 +33,11 @@ class RateLimiterTest(unittest.TestCase):
         self.assertTrue(self.limiter.check("bob").allowed)
 
     def test_retry_after_counts_down_to_oldest_hit_expiring(self):
-        self.limiter.check("k")            # t=0
+        self.limiter.check("k")
         self.clock.advance(10)
-        self.limiter.check("k")            # t=10
-        self.limiter.check("k")            # t=10
-        self.clock.advance(5)              # t=15: oldest expires at t=60
+        self.limiter.check("k")
+        self.limiter.check("k")
+        self.clock.advance(5)
         rejected = self.limiter.check("k")
         self.assertFalse(rejected.allowed)
         self.assertEqual(rejected.retry_after_seconds, 45)
@@ -46,21 +46,20 @@ class RateLimiterTest(unittest.TestCase):
         for _ in range(3):
             self.limiter.check("k")
         self.clock.advance(59.6)
-        self.assertEqual(self.limiter.check("k").retry_after_seconds, 1)  # ceil(0.4)
+        self.assertEqual(self.limiter.check("k").retry_after_seconds, 1)
 
     def test_window_slides_rather_than_resetting(self):
-        self.limiter.check("k")            # t=0
+        self.limiter.check("k")
         self.clock.advance(30)
-        self.limiter.check("k")            # t=30
-        self.limiter.check("k")            # t=30
-        self.clock.advance(30)             # t=60: only the t=0 hit has expired
+        self.limiter.check("k")
+        self.limiter.check("k")
+        self.clock.advance(30)
         self.assertTrue(self.limiter.check("k").allowed)
         self.assertFalse(self.limiter.check("k").allowed)
-        self.clock.advance(30)             # t=90: the two t=30 hits expire
+        self.clock.advance(30)
         self.assertTrue(self.limiter.check("k").allowed)
 
     def test_no_double_limit_burst_at_window_boundary(self):
-        """A fixed window would allow 3 at t=59 and 3 more at t=61."""
         self.clock.advance(59)
         for _ in range(3):
             self.assertTrue(self.limiter.check("k").allowed)
@@ -70,10 +69,10 @@ class RateLimiterTest(unittest.TestCase):
     def test_rejected_requests_do_not_extend_the_block(self):
         for _ in range(3):
             self.limiter.check("k")
-        for _ in range(50):                # hammering while limited
+        for _ in range(50):
             self.clock.advance(1)
             self.limiter.check("k")
-        self.clock.advance(10)             # t=60: original hits expired
+        self.clock.advance(10)
         self.assertTrue(self.limiter.check("k").allowed)
 
     def test_idle_keys_are_swept_to_bound_memory(self):
@@ -100,7 +99,7 @@ class RateLimiterTest(unittest.TestCase):
             t.start()
         for t in threads:
             t.join()
-        self.assertEqual(len(allowed), 50)  # exactly the limit, never more
+        self.assertEqual(len(allowed), 50)
 
     def test_invalid_configuration_rejected(self):
         with self.assertRaises(ValueError):

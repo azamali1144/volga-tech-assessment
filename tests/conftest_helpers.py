@@ -1,9 +1,3 @@
-"""Synthetic audio generators for tests.
-
-No fixture files are checked in: every test builds the exact audio it needs,
-so durations, sample rates and channel counts are known precisely.
-"""
-
 from __future__ import annotations
 
 import math
@@ -24,14 +18,10 @@ def make_tone_wav(
     channels: int = 1,
     frequency: float = 440.0,
 ) -> Path:
-    """Write a 16-bit PCM sine-wave WAV using only the stdlib (no ffmpeg)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     n_frames = round(seconds * sample_rate)
     amplitude = 0.3 * 32767
-    # Build one second of audio and tile it: with an integer frequency the
-    # tone completes whole cycles each second, so the repeats join seamlessly,
-    # and multi-minute test files take milliseconds instead of seconds.
     one_second = b"".join(
         struct.pack("<h", int(amplitude * math.sin(2 * math.pi * frequency * i / sample_rate)))
         * channels
@@ -56,10 +46,6 @@ def make_tone_file(
     frequency: float = 440.0,
     with_video: bool = False,
 ) -> Path:
-    """Write a sine tone in whatever format ``path``'s extension implies, via ffmpeg.
-
-    Defaults to 44.1kHz stereo on purpose, so normalization has real work to do.
-    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y"]
@@ -78,7 +64,6 @@ def make_tone_file(
 
 
 def wav_info(path: str | Path) -> tuple[int, int, int, float]:
-    """Return ``(channels, sample_rate, sample_width_bits, duration_seconds)``."""
     with wave.open(str(path), "rb") as w:
         return (
             w.getnchannels(),
