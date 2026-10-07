@@ -1,7 +1,7 @@
 import threading
 import unittest
 
-from app.rate_limit import RateLimiter
+from app.infrastructure.rate_limit import RateLimiter
 
 
 class FakeClock:

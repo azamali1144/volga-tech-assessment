@@ -2,7 +2,7 @@ import asyncio
 import time
 import unittest
 
-from app.queue_backend import InMemoryQueue, JobQueue, QueueClosedError
+from app.infrastructure.queue import InMemoryQueue, JobQueue, QueueClosedError
 
 
 class InMemoryQueueTest(unittest.IsolatedAsyncioTestCase):

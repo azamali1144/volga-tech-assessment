@@ -3,9 +3,9 @@ import time
 import unittest
 from pathlib import Path
 
-from app.config import Settings
-from app.store import JobStatus
-from app.transcription_engine import MockEngine
+from app.core.config import Settings
+from app.infrastructure.database import JobStatus
+from app.services.transcription.engines import MockEngine
 from tests.conftest_helpers import (
     FFMPEG_AVAILABLE,
     SKIP_REASON_NO_FFMPEG,
@@ -16,7 +16,8 @@ from tests.conftest_helpers import (
 try:
     from fastapi.testclient import TestClient
 
-    from app.main import caller_id_for, create_app
+    from app.api.dependencies import caller_id_for
+    from app.main import create_app
 
     CLIENT_AVAILABLE = True
 except (ImportError, RuntimeError):
@@ -310,8 +311,8 @@ class UnexpectedErrorTest(_ApiTestCase):
 class StartupRecoveryTest(unittest.TestCase):
     @unittest.skipUnless(CLIENT_AVAILABLE and FFMPEG_AVAILABLE, "needs httpx2 and ffmpeg")
     def test_interrupted_and_queued_jobs_are_finished_after_restart(self):
-        from app.store import JobStore
-        from app.storage_backend import LocalDiskStorage
+        from app.infrastructure.database import JobStore
+        from app.infrastructure.storage import LocalDiskStorage
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

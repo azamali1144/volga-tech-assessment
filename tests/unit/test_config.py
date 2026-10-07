@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app.config import Settings
+from app.core.config import Settings
 
 
 class SettingsDefaultsTest(unittest.TestCase):

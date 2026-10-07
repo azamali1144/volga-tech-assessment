@@ -6,19 +6,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app.audio import AudioChunk, AudioProcessingError, split_into_chunks
-from app.config import Settings
-from app.transcription_engine import (
+from app.services.audio import AudioChunk, AudioProcessingError, split_into_chunks
+from app.core.config import Settings
+from app.services.transcription.engines import (
     EngineUnavailableError,
     MockEngine,
-    Segment,
     TranscriptionEngine,
-    TranscriptionResult,
     WhisperEngine,
-    Word,
     get_engine,
-    merge_chunk_results,
 )
+from app.services.transcription.merge import merge_chunk_results
+from app.services.transcription.models import Segment, TranscriptionResult, Word
 from tests.conftest_helpers import make_tone_wav
 
 
@@ -206,7 +204,7 @@ class WhisperEngineMissingDependencyTest(unittest.TestCase):
             return real_import(name, *args, **kwargs)
 
         with mock.patch("builtins.__import__", side_effect=blocked_import):
-            with self.assertLogs("app.transcription_engine", level="ERROR") as logs:
+            with self.assertLogs("app.services.transcription.engines", level="ERROR") as logs:
                 with self.assertRaises(EngineUnavailableError) as ctx:
                     WhisperEngine().transcribe(Path("unused.wav"))
         self.assertEqual(ctx.exception.error_code, "engine_unavailable")

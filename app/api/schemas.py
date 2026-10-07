@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.store import Job, JobStatus
+from app.infrastructure.database import Job, JobStatus
 
 INTERNAL_ERROR_MESSAGE = "Transcription failed due to an internal error."
 

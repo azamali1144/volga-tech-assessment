@@ -5,8 +5,8 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from app.config import Settings
-from app.logging_config import configure_logging
+from app.core.config import Settings
+from app.core.logging import configure_logging
 
 
 class LoggingConfigTest(unittest.TestCase):

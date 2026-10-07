@@ -7,17 +7,13 @@ import time
 import unittest
 from pathlib import Path
 
-from app.audio import AudioProcessingError
-from app.queue_backend import InMemoryQueue
-from app.storage_backend import LocalDiskStorage, ObjectNotFoundError
-from app.store import JobStatus, JobStore
-from app.transcription_engine import EngineUnavailableError, MockEngine
-from app.worker import (
-    TranscriptionPipeline,
-    Worker,
-    describe_error,
-    is_retryable,
-)
+from app.services.audio import AudioProcessingError
+from app.infrastructure.queue import InMemoryQueue
+from app.infrastructure.storage import LocalDiskStorage, ObjectNotFoundError
+from app.infrastructure.database import JobStatus, JobStore
+from app.services.transcription.engines import EngineUnavailableError, MockEngine
+from app.services.pipeline import TranscriptionPipeline
+from app.services.worker import Worker, describe_error, is_retryable
 from tests.conftest_helpers import FFMPEG_AVAILABLE, SKIP_REASON_NO_FFMPEG, make_tone_wav
 
 SETTLE_TIMEOUT = 10.0
@@ -349,7 +345,7 @@ class WorkerTest(_TempDirCase):
 
         self.store.mark_processing = flaky_mark_processing
         first, second = self.submit(name="a.wav"), self.submit(name="b.wav")
-        with self.assertLogs("app.worker", level="ERROR") as logs:
+        with self.assertLogs("app.services.worker", level="ERROR") as logs:
             await self.queue.enqueue(first.id)
             await self.queue.enqueue(second.id)
             await self.wait_until_settled(second.id)

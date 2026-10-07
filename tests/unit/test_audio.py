@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.audio import (
+from app.services.audio import (
     AudioProcessingError,
     normalize_to_wav,
     plan_chunks,

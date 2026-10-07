@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage_backend import (
+from app.infrastructure.storage import (
     InvalidKeyError,
     LocalDiskStorage,
     ObjectNotFoundError,

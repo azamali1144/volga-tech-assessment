@@ -4,7 +4,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from app.store import (
+from app.infrastructure.database import (
     InvalidTransitionError,
     JobNotFoundError,
     JobStatus,
